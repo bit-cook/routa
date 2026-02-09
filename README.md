@@ -1,9 +1,9 @@
-# ACP Manager for IntelliJ IDEA
+# Agent Dispatcher for IntelliJ IDEA
 
 <!-- Plugin description -->
 Manage multiple ACP (Agent Client Protocol) compatible coding agents directly from your IDE.
 
-ACP Manager provides multi-agent session management, real-time streaming chat interface, tool call visualization, and efficient process lifecycle management.
+Agent Dispatcher provides multi-agent session management, real-time streaming chat interface, tool call visualization, and efficient process lifecycle management.
 
 Supports Claude Code, Codex CLI, Gemini CLI, and any ACP-compatible agents. Automatically detects agents from AutoDev/Xiuper configurations.
 <!-- Plugin description end -->
@@ -34,9 +34,9 @@ Any ACP-compatible agent, including:
    - Download from JetBrains Marketplace (coming soon) or build from source
    - Install via Settings → Plugins → Install from Disk
 
-2. **Open ACP Manager** tool window
+2. **Open Agent Dispatcher** tool window
    - Find it in the right sidebar
-   - Or: View → Tool Windows → ACP Manager
+   - Or: View → Tool Windows → Agent Dispatcher
 
 3. **Start chatting immediately!**
    - The Welcome page shows detected agents and an input area
@@ -50,12 +50,12 @@ Any ACP-compatible agent, including:
 
 ## Configuration
 
-ACP Manager uses a smart 3-tier configuration system with automatic agent detection:
+Agent Dispatcher uses a smart 3-tier configuration system with automatic agent detection:
 
 ### Configuration Priority
 
 ```
-Highest: ~/.acp-manager/config.yaml (your manual configurations)
+Highest: ~/.agent-dispatcher/config.yaml (your manual configurations)
    ↓
 Middle:  ~/.autodev/config.yaml (AutoDev/Xiuper shared config)
    ↓
@@ -64,7 +64,7 @@ Lowest:  System PATH (auto-detected CLI tools - only for missing agents)
 
 ### 1. Automatic Detection from AutoDev/Xiuper
 
-If you already use [AutoDev](https://github.com/unit-mesh/auto-dev) or [Xiuper](https://github.com/unit-mesh/xiuper), ACP Manager will **automatically use** your existing agent configurations from `~/.autodev/config.yaml`:
+If you already use [AutoDev](https://github.com/unit-mesh/auto-dev) or [Xiuper](https://github.com/unit-mesh/xiuper), Agent Dispatcher will **automatically use** your existing agent configurations from `~/.autodev/config.yaml`:
 
 ```yaml
 # ~/.autodev/config.yaml (your existing config)
@@ -91,7 +91,7 @@ activeAcpAgent: kimi
 
 ### 2. Auto-Detection for Missing Agents
 
-For agents **NOT** in your AutoDev config, ACP Manager will automatically detect them from your system PATH:
+For agents **NOT** in your AutoDev config, Agent Dispatcher will automatically detect them from your system PATH:
 
 - Checks common ACP CLI tools: `codex`, `gemini`, `copilot`, `auggie`, etc.
 - Uses `which` (Unix/macOS) or `where` (Windows) to find full paths
@@ -99,7 +99,7 @@ For agents **NOT** in your AutoDev config, ACP Manager will automatically detect
 
 ### 3. Manual Configuration
 
-Create or edit `~/.acp-manager/config.yaml` to add custom agents or override any settings:
+Create or edit `~/.agent-dispatcher/config.yaml` to add custom agents or override any settings:
 
 ```yaml
 # Active agent (optional - can be set via UI)
@@ -129,8 +129,8 @@ agents:
       GOOGLE_API_KEY: "your-api-key-here"
 ```
 
-**Note:** 
-- Agents in `~/.acp-manager/config.yaml` override AutoDev config
+**Note:**
+- Agents in `~/.agent-dispatcher/config.yaml` override AutoDev config
 - Agents in `~/.autodev/config.yaml` are used as configured (with full paths)
 - Auto-detection only fills in **missing** agents from system PATH
 
@@ -146,8 +146,8 @@ agents:
 
 ### Quick Start
 
-1. Open the **ACP Manager** tool window (View → Tool Windows → ACP Manager)
-2. Click **+ Add Agent** to create an agent configuration, or manually edit `~/.acp-manager/config.yaml`
+1. Open the **Agent Dispatcher** tool window (View → Tool Windows → Agent Dispatcher)
+2. Click **+ Add Agent** to create an agent configuration, or manually edit `~/.agent-dispatcher/config.yaml`
 3. Select an agent from the dropdown
 4. Click **Connect**
 5. Start chatting!
@@ -202,12 +202,12 @@ Full ACP 1.0 protocol implementation:
 ### Building from Source
 
 ```bash
-git clone https://github.com/phodal/acp-manager.git
-cd acp-manager
+git clone https://github.com/phodal/agent-dispatcher.git
+cd agent-dispatcher
 ./gradlew buildPlugin
 ```
 
-The plugin will be built to `build/distributions/acp-manager-*.zip`
+The plugin will be built to `build/distributions/agent-dispatcher-*.zip`
 
 ### Running in Development
 
@@ -218,7 +218,7 @@ The plugin will be built to `build/distributions/acp-manager-*.zip`
 ### Project Structure
 
 ```
-acp-manager/
+agent-dispatcher/
 ├── src/main/kotlin/com/github/phodal/acpmanager/
 │   ├── acp/                 # Core ACP protocol implementation
 │   │   ├── AcpClient.kt
@@ -245,7 +245,7 @@ acp-manager/
 
 1. Check that the agent command is in your PATH
 2. Verify environment variables in config.yaml
-3. Check `~/.acp-manager/logs/` for ACP logs
+3. Check `~/.agent-dispatcher/logs/` for ACP logs
 4. Try running the agent command manually to test
 
 ### Permission Errors
@@ -276,5 +276,5 @@ Contributions are welcome! Please:
 ## Links
 
 - [Agent Client Protocol Specification](https://github.com/agentclientprotocol/acp)
-- [Issue Tracker](https://github.com/phodal/acp-manager/issues)
-- [Plugin Page](https://plugins.jetbrains.com/plugin/acp-manager) (coming soon)
+- [Issue Tracker](https://github.com/phodal/agent-dispatcher/issues)
+- [Plugin Page](https://plugins.jetbrains.com/plugin/agent-dispatcher) (coming soon)

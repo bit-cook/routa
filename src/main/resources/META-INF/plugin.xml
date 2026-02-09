@@ -1,10 +1,10 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
-    <id>com.github.phodal.acpmanager</id>
-    <name>ACP Manager</name>
+    <id>com.github.phodal.agentdispatcher</id>
+    <name>Agent Dispatcher</name>
     <vendor>phodal</vendor>
     <description><![CDATA[
-        ACP (Agent Client Protocol) Manager for IntelliJ IDEA.
+        Agent Dispatcher for IntelliJ IDEA - Manage multiple ACP (Agent Client Protocol) compatible coding agents.
         <br><br>
         Manage multiple ACP-compatible coding agents (Claude Code, Codex CLI, Gemini CLI, etc.)
         directly from your IDE.
@@ -24,7 +24,7 @@
     <resource-bundle>messages.AcpBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow id="ACP Manager"
+        <toolWindow id="Agent Dispatcher"
                     factoryClass="com.github.phodal.acpmanager.ui.AcpToolWindowFactory"
                     anchor="right"
                     icon="com.github.phodal.acpmanager.AcpIcons.ToolWindow"/>
