@@ -8,6 +8,8 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
 import java.awt.*
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.text.SimpleDateFormat
 import java.util.*
 import javax.swing.*
@@ -18,9 +20,9 @@ private val log = logger<ClaudeCodeRenderer>()
  * Custom renderer for Claude Code with Claude-specific styling.
  *
  * Features:
- * - Orange/amber accent colors for Claude branding
- * - Enhanced tool call display with parameter details
- * - Compact thinking display
+ * - Collapsible thinking panel (2 lines by default)
+ * - Unified background colors
+ * - Compact tool call display
  */
 class ClaudeCodeRenderer(
     private val agentKey: String,
@@ -39,20 +41,25 @@ class ClaudeCodeRenderer(
     }
 
     // Streaming state
-    private var currentThinkingPanel: StreamingPanel? = null
-    private var currentMessagePanel: StreamingPanel? = null
+    private var currentThinkingPanel: CollapsibleThinkingPanel? = null
+    private var currentMessagePanel: CompactStreamingPanel? = null
     private val thinkingBuffer = StringBuilder()
     private val messageBuffer = StringBuilder()
 
     // Tool call tracking
-    private val toolCallPanels = mutableMapOf<String, ToolCallPanel>()
+    private val toolCallPanels = mutableMapOf<String, CompactToolCallPanel>()
 
-    // Claude Code colors
-    private val claudeAccent = JBColor(Color(0xD97706), Color(0xFBBF24)) // Amber
-    private val claudeThinkingBg = JBColor(Color(0xFEF3C7), Color(0x422006))
-    private val claudeThinkingFg = JBColor(Color(0x92400E), Color(0xFCD34D))
-    private val claudeMessageBg = JBColor(Color(0xFFF7ED), Color(0x1C1917))
-    private val claudeMessageFg = JBColor(Color(0x9A3412), Color(0xFDBA74))
+    // Task tracking - for Task tool calls
+    private val tasks = mutableListOf<TaskInfo>()
+    private var taskSummaryPanel: TaskSummaryPanel? = null
+
+    // Unified colors - use panel background
+    private val panelBg = UIUtil.getPanelBackground()
+    private val thinkingFg = JBColor(Color(0x6A1B9A), Color(0xCE93D8)) // Purple for thinking
+    private val messageFg = JBColor(Color(0x2E7D32), Color(0x81C784)) // Green for assistant
+    private val userFg = JBColor(Color(0x1565C0), Color(0x64B5F6)) // Blue for user
+    private val toolFg = JBColor(Color(0xE65100), Color(0xFFB74D)) // Orange for tools
+    private val taskFg = JBColor(Color(0x00695C), Color(0x4DB6AC)) // Teal for tasks
 
     override fun onEvent(event: RenderEvent) {
         log.info("ClaudeCodeRenderer[$agentKey]: onEvent ${event::class.simpleName}")
@@ -68,264 +75,428 @@ class ClaudeCodeRenderer(
             is RenderEvent.ToolCallUpdate -> updateToolCall(event)
             is RenderEvent.ToolCallEnd -> endToolCall(event)
             is RenderEvent.PlanUpdate -> addPlanUpdate(event)
-            is RenderEvent.ModeChange -> addModeChange(event)
+            is RenderEvent.ModeChange -> { /* ignore */ }
             is RenderEvent.Info -> addInfo(event)
             is RenderEvent.Error -> addError(event)
-            is RenderEvent.Connected -> addConnected(event)
-            is RenderEvent.Disconnected -> addDisconnected(event)
-            is RenderEvent.PromptComplete -> onPromptComplete(event)
+            is RenderEvent.Connected -> { /* ignore - don't show connection message */ }
+            is RenderEvent.Disconnected -> addInfo(RenderEvent.Info("Disconnected"))
+            is RenderEvent.PromptComplete -> onPromptComplete()
         }
     }
 
     private fun addUserMessage(event: RenderEvent.UserMessage) {
-        val panel = createMessagePanel(
-            "You", event.content, event.timestamp,
-            JBColor.BLUE, JBColor(Color(0xE3F2FD), Color(0x1A237E))
-        )
+        val panel = createCompactMessagePanel("You", event.content, event.timestamp, userFg)
         addPanel(panel)
-        scrollCallback()
+        scrollToContentBottom()
     }
 
     private fun startThinking() {
         thinkingBuffer.clear()
-        val panel = StreamingPanel(
-            "🧠 Claude is thinking...",
-            claudeThinkingFg,
-            claudeThinkingBg
-        )
+        val panel = CollapsibleThinkingPanel()
         currentThinkingPanel = panel
         addPanel(panel)
-        scrollCallback()
+        scrollToContentBottom()
     }
 
     private fun appendThinking(content: String) {
         thinkingBuffer.append(content)
-        val display = if (thinkingBuffer.length > 200) {
-            thinkingBuffer.takeLast(200).toString() + "..."
-        } else {
-            thinkingBuffer.toString()
-        }
-        currentThinkingPanel?.updateContent(display)
-        scrollCallback()
+        currentThinkingPanel?.updateContent(thinkingBuffer.toString())
     }
 
     private fun endThinking(fullContent: String) {
-        currentThinkingPanel?.let { panel ->
-            contentPanel.remove(panel)
-            val finalPanel = createThinkingPanel(fullContent)
-            addPanel(finalPanel)
-        }
+        currentThinkingPanel?.finalize(fullContent)
         currentThinkingPanel = null
         thinkingBuffer.clear()
-        scrollCallback()
+        scrollToContentBottom()
     }
 
     private fun startMessage() {
         messageBuffer.clear()
-        val panel = StreamingPanel(
-            "Claude",
-            claudeAccent,
-            claudeMessageBg
-        )
+        val panel = CompactStreamingPanel("Assistant", messageFg)
         currentMessagePanel = panel
         addPanel(panel)
-        scrollCallback()
+        scrollToContentBottom()
     }
 
     private fun appendMessage(content: String) {
         messageBuffer.append(content)
         currentMessagePanel?.updateContent(messageBuffer.toString())
-        scrollCallback()
+        scrollToContentBottom()
     }
 
     private fun endMessage(fullContent: String) {
-        currentMessagePanel?.let { panel ->
-            contentPanel.remove(panel)
-            val finalPanel = createMessagePanel(
-                "Claude", fullContent, System.currentTimeMillis(),
-                claudeAccent, claudeMessageBg
-            )
-            addPanel(finalPanel)
-        }
+        currentMessagePanel?.finalize(fullContent)
         currentMessagePanel = null
         messageBuffer.clear()
-        scrollCallback()
+        scrollToContentBottom()
     }
 
     private fun startToolCall(event: RenderEvent.ToolCallStart) {
-        val panel = ToolCallPanel(event.toolName, event.title ?: event.toolName)
-        toolCallPanels[event.toolCallId] = panel
-        addPanel(panel)
-        scrollCallback()
+        // Check if this is a Task tool call
+        val isTask = event.kind?.equals("Task", ignoreCase = true) == true ||
+                     event.toolName.equals("Task", ignoreCase = true)
+
+        if (isTask) {
+            // Track as a task
+            val taskInfo = TaskInfo(
+                id = event.toolCallId,
+                title = event.title ?: "Task",
+                status = ToolCallStatus.IN_PROGRESS
+            )
+            tasks.add(taskInfo)
+            updateTaskSummary()
+        } else {
+            // Regular tool call
+            val panel = CompactToolCallPanel(event.toolName, event.title ?: event.toolName)
+            toolCallPanels[event.toolCallId] = panel
+            addPanel(panel)
+        }
+        scrollToContentBottom()
     }
 
     private fun updateToolCall(event: RenderEvent.ToolCallUpdate) {
-        toolCallPanels[event.toolCallId]?.updateStatus(event.status, event.title)
-        scrollCallback()
+        // Check if this is a task
+        val taskIndex = tasks.indexOfFirst { it.id == event.toolCallId }
+        if (taskIndex >= 0) {
+            tasks[taskIndex] = tasks[taskIndex].copy(
+                status = event.status,
+                title = event.title ?: tasks[taskIndex].title
+            )
+            updateTaskSummary()
+        } else {
+            toolCallPanels[event.toolCallId]?.updateStatus(event.status, event.title)
+        }
     }
 
     private fun endToolCall(event: RenderEvent.ToolCallEnd) {
-        toolCallPanels[event.toolCallId]?.complete(event.status, event.output)
-        scrollCallback()
+        // Check if this is a task
+        val taskIndex = tasks.indexOfFirst { it.id == event.toolCallId }
+        if (taskIndex >= 0) {
+            tasks[taskIndex] = tasks[taskIndex].copy(
+                status = event.status,
+                output = event.output
+            )
+            updateTaskSummary()
+        } else {
+            toolCallPanels[event.toolCallId]?.complete(event.status, event.output)
+        }
+        scrollToContentBottom()
+    }
+
+    private fun updateTaskSummary() {
+        if (tasks.isEmpty()) return
+
+        if (taskSummaryPanel == null) {
+            taskSummaryPanel = TaskSummaryPanel(tasks, taskFg)
+            // Insert at the beginning of content panel
+            contentPanel.add(taskSummaryPanel, 0)
+        } else {
+            taskSummaryPanel?.updateTasks(tasks)
+        }
+        contentPanel.revalidate()
+        contentPanel.repaint()
     }
 
     private fun addPlanUpdate(event: RenderEvent.PlanUpdate) {
-        val text = buildString {
-            event.entries.forEachIndexed { i, entry ->
-                val marker = when (entry.status) {
-                    PlanEntryStatus.COMPLETED -> "[x]"
-                    PlanEntryStatus.IN_PROGRESS -> "[*]"
-                    PlanEntryStatus.PENDING -> "[ ]"
-                }
-                appendLine("${i + 1}. $marker ${entry.content}")
-            }
-        }.trim()
-        if (text.isNotBlank()) addInfoPanel("📋 Plan:\n$text", claudeAccent)
-        scrollCallback()
-    }
-
-    private fun addModeChange(event: RenderEvent.ModeChange) {
-        addInfoPanel("Mode: ${event.modeId}", claudeAccent)
+        // Plan updates are handled separately
     }
 
     private fun addInfo(event: RenderEvent.Info) {
-        addInfoPanel(event.message, UIUtil.getLabelDisabledForeground())
-    }
-
-    private fun addError(event: RenderEvent.Error) {
-        addInfoPanel("⚠️ ${event.message}", JBColor.RED)
-    }
-
-    private fun addConnected(event: RenderEvent.Connected) {
-        addInfoPanel("🔗 Connected to Claude Code", claudeAccent)
-    }
-
-    private fun addDisconnected(event: RenderEvent.Disconnected) {
-        addInfoPanel("🔌 Disconnected from Claude Code", UIUtil.getLabelDisabledForeground())
-    }
-
-    private fun onPromptComplete(event: RenderEvent.PromptComplete) {
-        log.info("ClaudeCodeRenderer[$agentKey]: Prompt complete (${event.stopReason})")
-    }
-
-    private fun addInfoPanel(text: String, color: Color) {
+        val label = JBLabel("ℹ ${event.message}").apply {
+            foreground = UIUtil.getLabelDisabledForeground()
+            font = font.deriveFont(font.size2D - 1)
+            border = JBUI.Borders.empty(2, 8)
+        }
         val panel = JPanel(BorderLayout()).apply {
             isOpaque = false
-            border = JBUI.Borders.empty(2, 8)
-            add(JBLabel(text).apply {
-                foreground = color
-                font = font.deriveFont(font.size2D - 1)
-            }, BorderLayout.WEST)
+            add(label, BorderLayout.WEST)
         }
         addPanel(panel)
     }
 
-    private fun createMessagePanel(
-        name: String, content: String, timestamp: Long,
-        headerColor: Color, bgColor: Color
-    ): JPanel {
-        return object : JPanel(BorderLayout()) {
-            override fun getPreferredSize(): Dimension {
-                val parentWidth = parent?.width ?: 400
-                val pref = super.getPreferredSize()
-                return Dimension(parentWidth, pref.height)
-            }
-        }.apply {
-            isOpaque = true
-            background = bgColor
-            border = JBUI.Borders.empty(4, 8)
-
-            val wrapper = JPanel(BorderLayout()).apply {
-                isOpaque = false
-                border = JBUI.Borders.empty(6, 10)
-            }
-
-            val header = JPanel(BorderLayout()).apply {
-                isOpaque = false
-                border = JBUI.Borders.emptyBottom(4)
-                add(JBLabel(name).apply {
-                    foreground = headerColor
-                    font = font.deriveFont(Font.BOLD)
-                }, BorderLayout.WEST)
-                add(JBLabel(SimpleDateFormat("HH:mm:ss").format(Date(timestamp))).apply {
-                    foreground = UIUtil.getLabelDisabledForeground()
-                    font = font.deriveFont(font.size2D - 2)
-                }, BorderLayout.EAST)
-            }
-            wrapper.add(header, BorderLayout.NORTH)
-
-            val textArea = createWrappingTextArea(content)
-            wrapper.add(textArea, BorderLayout.CENTER)
-            add(wrapper, BorderLayout.CENTER)
+    private fun addError(event: RenderEvent.Error) {
+        val label = JBLabel("⚠️ ${event.message}").apply {
+            foreground = JBColor.RED
+            border = JBUI.Borders.empty(2, 8)
         }
-    }
-
-    private fun createWrappingTextArea(content: String, foregroundColor: Color? = null): JTextArea {
-        return object : JTextArea(content) {
-            override fun getPreferredSize(): Dimension {
-                val parentWidth = parent?.parent?.parent?.width ?: parent?.parent?.width ?: parent?.width ?: 400
-                val availableWidth = maxOf(100, parentWidth - 50)
-                val fm = getFontMetrics(font)
-                val lines = if (availableWidth > 0 && text.isNotEmpty()) {
-                    var lineCount = 0
-                    for (line in text.split("\n")) {
-                        if (line.isEmpty()) lineCount++ else {
-                            val lineWidth = fm.stringWidth(line)
-                            lineCount += maxOf(1, (lineWidth + availableWidth - 1) / availableWidth)
-                        }
-                    }
-                    maxOf(1, lineCount)
-                } else 1
-                return Dimension(availableWidth, lines * fm.height + 4)
-            }
-        }.apply {
-            isEditable = false
+        val panel = JPanel(BorderLayout()).apply {
             isOpaque = false
-            lineWrap = true
-            wrapStyleWord = true
-            font = UIUtil.getLabelFont()
-            foreground = foregroundColor ?: UIUtil.getLabelForeground()
+            add(label, BorderLayout.WEST)
+        }
+        addPanel(panel)
+    }
+
+    private fun onPromptComplete() {
+        log.info("ClaudeCodeRenderer[$agentKey]: Prompt complete")
+    }
+
+    private fun scrollToContentBottom() {
+        // Only scroll to the actual content, not empty space
+        SwingUtilities.invokeLater {
+            scrollCallback()
         }
     }
 
-    private fun createThinkingPanel(content: String): JPanel {
-        return object : JPanel(BorderLayout()) {
-            override fun getPreferredSize(): Dimension {
-                val parentWidth = parent?.width ?: 400
-                val pref = super.getPreferredSize()
-                return Dimension(parentWidth, pref.height)
+    private fun createCompactMessagePanel(name: String, content: String, timestamp: Long, headerColor: Color): JPanel {
+        return object : JPanel() {
+            init {
+                layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                isOpaque = false
+                border = JBUI.Borders.empty(4, 8)
+
+                val header = JPanel(BorderLayout()).apply {
+                    isOpaque = false
+                    maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(20))
+                    add(JBLabel(name).apply {
+                        foreground = headerColor
+                        font = font.deriveFont(Font.BOLD)
+                    }, BorderLayout.WEST)
+                    add(JBLabel(SimpleDateFormat("HH:mm:ss").format(Date(timestamp))).apply {
+                        foreground = UIUtil.getLabelDisabledForeground()
+                        font = font.deriveFont(font.size2D - 2)
+                    }, BorderLayout.EAST)
+                    alignmentX = Component.LEFT_ALIGNMENT
+                }
+                add(header)
+
+                val textArea = JTextArea(content).apply {
+                    isEditable = false
+                    isOpaque = false
+                    lineWrap = true
+                    wrapStyleWord = true
+                    font = UIUtil.getLabelFont()
+                    foreground = UIUtil.getLabelForeground()
+                    border = JBUI.Borders.emptyTop(2)
+                    alignmentX = Component.LEFT_ALIGNMENT
+                }
+                add(textArea)
             }
-        }.apply {
-            isOpaque = true
-            background = claudeThinkingBg
+
+            override fun getMaximumSize(): Dimension {
+                val pref = preferredSize
+                return Dimension(Int.MAX_VALUE, pref.height)
+            }
+        }
+    }
+
+    /**
+     * Collapsible thinking panel - shows 2 lines by default, expandable on click.
+     * Uses BoxLayout for proper vertical sizing.
+     */
+    inner class CollapsibleThinkingPanel : JPanel() {
+        private val headerLabel: JBLabel
+        private val contentLabel: JBLabel
+        private var fullContent: String = ""
+        private var isExpanded = false
+        private val maxCollapsedChars = 100
+
+        init {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            border = JBUI.Borders.empty(2, 8)
+
+            headerLabel = JBLabel("💡 Thinking...").apply {
+                foreground = thinkingFg
+                font = font.deriveFont(Font.ITALIC, font.size2D - 1)
+                cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+                alignmentX = Component.LEFT_ALIGNMENT
+            }
+
+            contentLabel = JBLabel().apply {
+                foreground = thinkingFg
+                font = font.deriveFont(Font.ITALIC, font.size2D - 1)
+                border = JBUI.Borders.emptyLeft(16)
+                alignmentX = Component.LEFT_ALIGNMENT
+            }
+
+            add(headerLabel)
+            add(contentLabel)
+
+            // Click to expand/collapse
+            val clickListener = object : MouseAdapter() {
+                override fun mouseClicked(e: MouseEvent) {
+                    isExpanded = !isExpanded
+                    updateDisplay()
+                    // Update parent layout
+                    parent?.revalidate()
+                    parent?.repaint()
+                }
+            }
+            headerLabel.addMouseListener(clickListener)
+            contentLabel.addMouseListener(clickListener)
+        }
+
+        override fun getMaximumSize(): Dimension {
+            val pref = preferredSize
+            return Dimension(Int.MAX_VALUE, pref.height)
+        }
+
+        fun updateContent(content: String) {
+            fullContent = content
+            updateDisplay()
+        }
+
+        fun finalize(content: String) {
+            fullContent = content
+            updateDisplay()
+        }
+
+        private fun updateDisplay() {
+            val displayText = if (isExpanded) {
+                fullContent.take(2000) // Limit expanded content
+            } else {
+                if (fullContent.length > maxCollapsedChars) {
+                    fullContent.take(maxCollapsedChars).replace("\n", " ") + "..."
+                } else {
+                    fullContent.replace("\n", " ")
+                }
+            }
+
+            contentLabel.text = if (displayText.isNotEmpty()) {
+                "<html><div style='width:500px'>$displayText</div></html>"
+            } else {
+                ""
+            }
+            contentLabel.isVisible = displayText.isNotEmpty()
+
+            headerLabel.text = if (fullContent.isNotEmpty()) {
+                "💡 Thinking ${if (isExpanded) "▼" else "▶"}"
+            } else {
+                "💡 Thinking..."
+            }
+            revalidate()
+            repaint()
+        }
+    }
+
+    /**
+     * Compact streaming panel for assistant messages.
+     * Uses BoxLayout for proper vertical sizing.
+     */
+    inner class CompactStreamingPanel(private val name: String, private val headerColor: Color) : JPanel() {
+        private val headerLabel: JBLabel
+        private val contentArea: JTextArea
+
+        init {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
             border = JBUI.Borders.empty(4, 8)
 
-            val wrapper = JPanel(BorderLayout()).apply {
+            headerLabel = JBLabel("$name (typing...)").apply {
+                foreground = headerColor
+                font = font.deriveFont(Font.BOLD)
+                alignmentX = Component.LEFT_ALIGNMENT
+            }
+            add(headerLabel)
+
+            contentArea = JTextArea().apply {
+                isEditable = false
                 isOpaque = false
-                border = JBUI.Borders.empty(4, 10)
+                lineWrap = true
+                wrapStyleWord = true
+                font = UIUtil.getLabelFont()
+                foreground = UIUtil.getLabelForeground()
+                border = JBUI.Borders.emptyTop(2)
+                alignmentX = Component.LEFT_ALIGNMENT
+            }
+            add(contentArea)
+        }
+
+        override fun getMaximumSize(): Dimension {
+            val pref = preferredSize
+            return Dimension(Int.MAX_VALUE, pref.height)
+        }
+
+        fun updateContent(content: String) {
+            contentArea.text = content
+            revalidate()
+            repaint()
+            parent?.revalidate()
+        }
+
+        fun finalize(content: String) {
+            headerLabel.text = name
+            contentArea.text = content
+            revalidate()
+            repaint()
+            parent?.revalidate()
+        }
+    }
+
+    /**
+     * Compact tool call panel - single line with status icon.
+     * Uses BorderLayout for proper sizing.
+     */
+    inner class CompactToolCallPanel(
+        private val toolName: String,
+        private var title: String
+    ) : JPanel(BorderLayout()) {
+        private val statusIcon: JBLabel
+        private val titleLabel: JBLabel
+        private var isCompleted = false
+
+        init {
+            isOpaque = false
+            border = JBUI.Borders.empty(1, 8)
+
+            val linePanel = JPanel(BorderLayout(4, 0)).apply {
+                isOpaque = false
             }
 
-            val header = JBLabel("🧠 Thinking").apply {
-                foreground = claudeThinkingFg
-                font = font.deriveFont(Font.ITALIC, font.size2D - 1)
+            statusIcon = JBLabel("▶").apply {
+                foreground = toolFg
+                font = font.deriveFont(Font.BOLD)
             }
-            wrapper.add(header, BorderLayout.NORTH)
+            linePanel.add(statusIcon, BorderLayout.WEST)
 
-            val displayContent = if (content.length > 300) content.take(300) + "..." else content
-            val textArea = createWrappingTextArea(displayContent, claudeThinkingFg).apply {
-                font = UIUtil.getLabelFont().deriveFont(Font.ITALIC)
+            titleLabel = JBLabel("Tool: $title").apply {
+                foreground = toolFg
+                font = font.deriveFont(font.size2D - 1)
             }
-            wrapper.add(textArea, BorderLayout.CENTER)
-            add(wrapper, BorderLayout.CENTER)
+            linePanel.add(titleLabel, BorderLayout.CENTER)
+
+            add(linePanel, BorderLayout.WEST)
+        }
+
+        override fun getPreferredSize(): Dimension {
+            val pref = super.getPreferredSize()
+            return Dimension(pref.width, minOf(pref.height, JBUI.scale(24)))
+        }
+
+        override fun getMaximumSize(): Dimension {
+            return Dimension(Int.MAX_VALUE, preferredSize.height)
+        }
+
+        fun updateStatus(status: ToolCallStatus, newTitle: String?) {
+            if (isCompleted) return
+            newTitle?.let { title = it; titleLabel.text = "Tool: $it" }
+            statusIcon.text = when (status) {
+                ToolCallStatus.IN_PROGRESS -> "▶"
+                ToolCallStatus.PENDING -> "○"
+                else -> "■"
+            }
+        }
+
+        fun complete(status: ToolCallStatus, output: String?) {
+            isCompleted = true
+            val (icon, color) = if (status == ToolCallStatus.COMPLETED) {
+                "✓" to JBColor(Color(0x2E7D32), Color(0x81C784))
+            } else {
+                "✗" to JBColor.RED
+            }
+            statusIcon.text = icon
+            statusIcon.foreground = color
+            titleLabel.foreground = color
         }
     }
 
     private fun addPanel(panel: JPanel) {
         panel.alignmentX = Component.LEFT_ALIGNMENT
-        // Set maximum size to prevent vertical stretching
-        panel.maximumSize = Dimension(Int.MAX_VALUE, panel.preferredSize.height)
+        // Ensure panel has proper sizing
+        val prefHeight = panel.preferredSize.height
+        panel.maximumSize = Dimension(Int.MAX_VALUE, prefHeight)
+        panel.minimumSize = Dimension(0, prefHeight)
         contentPanel.add(panel)
-        contentPanel.add(Box.createVerticalStrut(2))
         contentPanel.revalidate()
         contentPanel.repaint()
         container.revalidate()
@@ -339,6 +510,8 @@ class ClaudeCodeRenderer(
         thinkingBuffer.clear()
         messageBuffer.clear()
         toolCallPanels.clear()
+        tasks.clear()
+        taskSummaryPanel = null
         container.revalidate()
         container.repaint()
     }
@@ -352,7 +525,104 @@ class ClaudeCodeRenderer(
     }
 
     override fun getDebugState(): String {
-        return "ClaudeCodeRenderer[$agentKey](panels=${contentPanel.componentCount})"
+        return "ClaudeCodeRenderer[$agentKey](panels=${contentPanel.componentCount}, tasks=${tasks.size})"
+    }
+
+    /**
+     * Collapsible Task Summary Panel - shows task count when collapsed, all tasks when expanded.
+     */
+    inner class TaskSummaryPanel(
+        initialTasks: List<TaskInfo>,
+        private val accentColor: Color
+    ) : JPanel(BorderLayout()) {
+        private val headerLabel: JBLabel
+        private val taskListPanel: JPanel
+        private var isExpanded = false
+        private var currentTasks: List<TaskInfo> = initialTasks.toList()
+
+        init {
+            isOpaque = false
+            border = JBUI.Borders.empty(4, 8)
+
+            headerLabel = JBLabel(getHeaderText()).apply {
+                foreground = accentColor
+                font = font.deriveFont(Font.BOLD)
+                cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+                border = JBUI.Borders.empty(2, 0)
+            }
+
+            taskListPanel = JPanel().apply {
+                layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                isOpaque = false
+                isVisible = false
+                border = JBUI.Borders.emptyLeft(16)
+            }
+
+            add(headerLabel, BorderLayout.NORTH)
+            add(taskListPanel, BorderLayout.CENTER)
+
+            headerLabel.addMouseListener(object : MouseAdapter() {
+                override fun mouseClicked(e: MouseEvent) {
+                    isExpanded = !isExpanded
+                    updateDisplay()
+                }
+            })
+
+            updateDisplay()
+        }
+
+        fun updateTasks(newTasks: List<TaskInfo>) {
+            currentTasks = newTasks.toList()
+            updateDisplay()
+        }
+
+        private fun getHeaderText(): String {
+            val completed = currentTasks.count { it.status == ToolCallStatus.COMPLETED }
+            val total = currentTasks.size
+            val icon = if (isExpanded) "▼" else "▶"
+            return "$icon 📋 Tasks ($completed/$total completed)"
+        }
+
+        private fun updateDisplay() {
+            headerLabel.text = getHeaderText()
+            taskListPanel.isVisible = isExpanded
+
+            if (isExpanded) {
+                taskListPanel.removeAll()
+                for (task in currentTasks) {
+                    val statusIcon = when (task.status) {
+                        ToolCallStatus.COMPLETED -> "✓"
+                        ToolCallStatus.FAILED -> "✗"
+                        ToolCallStatus.IN_PROGRESS -> "▶"
+                        else -> "○"
+                    }
+                    val statusColor = when (task.status) {
+                        ToolCallStatus.COMPLETED -> JBColor(Color(0x2E7D32), Color(0x81C784))
+                        ToolCallStatus.FAILED -> JBColor.RED
+                        else -> accentColor
+                    }
+                    val taskLabel = JBLabel("$statusIcon ${task.title}").apply {
+                        foreground = statusColor
+                        font = font.deriveFont(font.size2D - 1)
+                        border = JBUI.Borders.empty(1, 0)
+                    }
+                    taskListPanel.add(taskLabel)
+                }
+            }
+
+            revalidate()
+            repaint()
+        }
     }
 }
+
+/**
+ * Task information for tracking.
+ */
+data class TaskInfo(
+    val id: String,
+    val title: String,
+    val status: ToolCallStatus,
+    val output: String? = null
+)
 

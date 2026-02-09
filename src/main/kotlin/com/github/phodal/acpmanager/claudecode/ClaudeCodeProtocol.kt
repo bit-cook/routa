@@ -130,9 +130,14 @@ private fun parseStreamEvent(eventObj: JsonObject): ClaudeStreamEvent {
     )
 }
 
+private val protocolLog = com.intellij.openapi.diagnostic.logger<ClaudeOutputMessage>()
+
 fun parseClaudeOutputLine(line: String): ClaudeOutputMessage? {
     val trimmed = line.trim()
     if (trimmed.isEmpty() || !trimmed.startsWith("{")) return null
+
+    // Log raw JSON for debugging
+    protocolLog.info("[ClaudeCode JSON] $trimmed")
 
     return try {
         val jsonObj = json.parseToJsonElement(trimmed).jsonObject

@@ -307,6 +307,15 @@ class ClaudeCodeClient(
                 val cmd = params["command"]?.toString()?.take(50) ?: ""
                 "Bash: $cmd"
             }
+            "Task" -> {
+                val desc = params["description"]?.toString() ?: ""
+                val subType = params["subagent_type"]?.toString() ?: ""
+                if (desc.isNotEmpty()) {
+                    if (subType.isNotEmpty()) "Task [$subType]: $desc" else "Task: $desc"
+                } else {
+                    "Task"
+                }
+            }
             else -> toolName
         }
     }
