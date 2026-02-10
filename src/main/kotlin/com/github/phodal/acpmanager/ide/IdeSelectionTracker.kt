@@ -15,6 +15,9 @@ import com.intellij.openapi.fileEditor.ex.FileEditorManagerEx
 import com.intellij.openapi.project.Project
 import com.intellij.util.messages.MessageBusConnection
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.lang.ref.WeakReference
 
 private val log = logger<IdeSelectionTracker>()
@@ -29,10 +32,13 @@ private val log = logger<IdeSelectionTracker>()
 class IdeSelectionTracker(
     private val project: Project,
     private val scope: CoroutineScope,
+    private val debounceDelayMs: Long = 500L,
 ) {
     private var connection: MessageBusConnection? = null
     private var selectionListener: SelectionListener? = null
     private var onNotification: ((IdeNotification) -> Unit)? = null
+    private var debounceJob: Job? = null
+    private var lastEditor: Editor? = null
 
     /**
      * Start tracking selection events.
@@ -44,7 +50,7 @@ class IdeSelectionTracker(
 
         val listener = object : SelectionListener {
             override fun selectionChanged(event: SelectionEvent) {
-                sendSelectionNotification(event.editor)
+                debouncedSendSelectionNotification(event.editor)
             }
         }
         this.selectionListener = listener
@@ -108,21 +114,39 @@ class IdeSelectionTracker(
      * Stop tracking selection events.
      */
     fun stopTracking() {
+        debounceJob?.cancel()
+        debounceJob = null
         connection?.disconnect()
         connection = null
         selectionListener = null
         onNotification = null
+        lastEditor = null
         log.info("Selection tracking stopped for project '${project.name}'")
+    }
+
+    /**
+     * Debounced version of sendSelectionNotification.
+     * Cancels any pending notification and schedules a new one after debounceDelayMs.
+     */
+    private fun debouncedSendSelectionNotification(editor: Editor) {
+        lastEditor = editor
+        debounceJob?.cancel()
+        debounceJob = scope.launch {
+            delay(debounceDelayMs)
+            lastEditor?.let { sendSelectionNotification(it) }
+        }
     }
 
     private fun sendSelectionNotification(editor: Editor) {
         try {
             val virtualFile = FileDocumentManager.getInstance().getFile(editor.document)
             val filePath = virtualFile?.path
+            val fileType = virtualFile?.fileType?.name
 
             val selectionModel = editor.selectionModel
             val startPosition: LogicalPosition = editor.offsetToLogicalPosition(selectionModel.selectionStart)
             val endPosition: LogicalPosition = editor.offsetToLogicalPosition(selectionModel.selectionEnd)
+            val cursorOffset = editor.caretModel.offset
 
             val notification = IdeNotification.SelectionChanged(
                 filePath = filePath,
@@ -131,6 +155,8 @@ class IdeSelectionTracker(
                 endLine = endPosition.line,
                 endColumn = endPosition.column,
                 selectedText = selectionModel.selectedText,
+                cursorOffset = cursorOffset,
+                fileType = fileType,
             )
 
             onNotification?.invoke(notification)

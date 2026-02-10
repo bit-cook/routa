@@ -49,6 +49,8 @@ sealed class IdeNotification {
         val endLine: Int,
         val endColumn: Int,
         val selectedText: String?,
+        val cursorOffset: Int = 0,
+        val fileType: String? = null,
     ) : IdeNotification() {
         override val method = METHOD
         companion object {
