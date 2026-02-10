@@ -84,9 +84,17 @@ class SkillDiscovery(
 
     /**
      * Register a single skill as a slash command.
+     * Only registers skills that are user-invocable (USER or BOTH).
+     * CLAUDE-only skills are not registered in the command registry.
      */
     private fun registerSkill(skill: SkillDefinition) {
         try {
+            // Only register skills that are visible in user completion
+            if (!SkillCommand.isVisibleInCompletion(skill)) {
+                log.debug("Skipping CLAUDE-only skill: ${skill.name}")
+                return
+            }
+
             val command = SkillCommand.fromSkill(skill)
             registry.register(command)
             log.debug("Registered skill command: /${skill.name}")
