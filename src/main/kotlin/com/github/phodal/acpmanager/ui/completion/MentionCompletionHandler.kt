@@ -16,7 +16,8 @@ private val log = logger<MentionCompletionHandler>()
  */
 class MentionCompletionHandler(
     private val inputArea: JBTextArea,
-    private val providers: List<MentionProvider>
+    private val providers: List<MentionProvider>,
+    private val onMentionInserted: ((MentionItem) -> Unit)? = null
 ) {
     private var currentPopup: MentionCompletionPopup? = null
     private var mentionStartPos: Int = -1
@@ -168,6 +169,9 @@ class MentionCompletionHandler(
 
         inputArea.text = newText
         inputArea.caretPosition = (before + item.insertText).length
+
+        // Notify about the inserted mention
+        onMentionInserted?.invoke(item)
     }
 
     /**

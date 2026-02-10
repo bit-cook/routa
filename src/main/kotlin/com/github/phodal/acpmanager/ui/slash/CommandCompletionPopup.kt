@@ -20,7 +20,7 @@ private val log = logger<CommandCompletionPopup>()
 
 /**
  * Popup UI for command completion.
- * Shows a list of available commands with keyboard/mouse navigation.
+ * Shows a list of available commands with keyboard/mouse navigation and parameter hints.
  */
 class CommandCompletionPopup(
     private val parent: Component,
@@ -29,6 +29,7 @@ class CommandCompletionPopup(
 ) {
     private val list = JBList(commands)
     private var popup: JBPopup? = null
+    private var parameterHintPopup: JBPopup? = null
 
     /**
      * Show the popup at the specified location.
@@ -58,12 +59,62 @@ class CommandCompletionPopup(
     }
 
     /**
+     * Show parameter hints for a command.
+     */
+    fun showParameterHints(command: SlashCommand, x: Int, y: Int) {
+        try {
+            closeParameterHints()
+
+            if (command.parameters.isEmpty()) {
+                return
+            }
+
+            val hintText = buildString {
+                append("Parameters: ")
+                command.parameters.forEach { param ->
+                    append(param.name)
+                    if (param.required) append("*") else append("?")
+                    append(" ")
+                }
+            }
+
+            val step = object : BaseListPopupStep<CommandParameter>("", command.parameters) {
+                override fun getTextFor(value: CommandParameter): String {
+                    return "${value.name}${if (value.required) "*" else "?"} - ${value.description}"
+                }
+            }
+
+            parameterHintPopup = JBPopupFactory.getInstance()
+                .createListPopup(step)
+                .apply {
+                    setRequestFocus(false)
+                    showInScreenCoordinates(parent, java.awt.Point(x, y))
+                }
+        } catch (e: Exception) {
+            log.debug("Failed to show parameter hints: ${e.message}")
+        }
+    }
+
+    /**
+     * Close parameter hints popup.
+     */
+    private fun closeParameterHints() {
+        try {
+            parameterHintPopup?.cancel()
+            parameterHintPopup = null
+        } catch (e: Exception) {
+            log.debug("Error closing parameter hints: ${e.message}")
+        }
+    }
+
+    /**
      * Close the popup.
      */
     fun close() {
         try {
             popup?.cancel()
             popup = null
+            closeParameterHints()
         } catch (e: Exception) {
             log.debug("Error closing popup: ${e.message}")
         }

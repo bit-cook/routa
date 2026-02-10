@@ -21,7 +21,8 @@ private val log = logger<CompletionManager>()
  */
 class CompletionManager(
     private val project: Project,
-    private val inputArea: JBTextArea
+    private val inputArea: JBTextArea,
+    private val onMentionInserted: ((com.github.phodal.acpmanager.ui.mention.MentionItem) -> Unit)? = null
 ) {
     private val mentionHandler: MentionCompletionHandler
     private val commandHandler: CommandCompletionHandler
@@ -34,7 +35,7 @@ class CompletionManager(
             TabMentionProvider(project)
         )
 
-        mentionHandler = MentionCompletionHandler(inputArea, providers)
+        mentionHandler = MentionCompletionHandler(inputArea, providers, onMentionInserted)
 
         // Initialize command handler
         commandHandler = CommandCompletionHandler(inputArea, SlashCommandRegistry.getInstance())

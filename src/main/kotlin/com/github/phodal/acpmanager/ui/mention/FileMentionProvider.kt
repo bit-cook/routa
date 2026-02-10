@@ -1,5 +1,6 @@
 package com.github.phodal.acpmanager.ui.mention
 
+import com.github.phodal.acpmanager.ui.fuzzy.FuzzyMatcher
 import com.intellij.icons.AllIcons
 import com.intellij.ide.projectView.ProjectViewNode
 import com.intellij.openapi.diagnostic.logger
@@ -27,17 +28,19 @@ class FileMentionProvider(private val project: Project) : MentionProvider {
     override fun getMentionType(): MentionType = MentionType.FILE
 
     override fun getMentions(query: String): List<MentionItem> {
-        val mentions = mutableListOf<MentionItem>()
+        val mentions = mutableListOf<Pair<MentionItem, Int>>()  // Item + score
         val seen = mutableSetOf<String>()
 
         // 1. Add open files first (highest priority)
         val fileEditorManager = FileEditorManager.getInstance(project)
         val openFiles = fileEditorManager.openFiles
         for (file in openFiles) {
-            if (matchesQuery(file.name, query)) {
+            val matchResult = FuzzyMatcher.match(file.name, query)
+            if (matchResult.matched) {
                 val item = createMentionItem(file)
                 if (seen.add(item.insertText)) {
-                    mentions.add(item)
+                    // Boost score for open files
+                    mentions.add(item to (matchResult.score + 100))
                 }
             }
         }
@@ -49,10 +52,13 @@ class FileMentionProvider(private val project: Project) : MentionProvider {
 
             for (psiFile in psiFiles) {
                 val virtualFile = psiFile.virtualFile
-                if (virtualFile != null && matchesQuery(virtualFile.name, query)) {
-                    val item = createMentionItem(virtualFile)
-                    if (seen.add(item.insertText)) {
-                        mentions.add(item)
+                if (virtualFile != null) {
+                    val matchResult = FuzzyMatcher.match(virtualFile.name, query)
+                    if (matchResult.matched) {
+                        val item = createMentionItem(virtualFile)
+                        if (seen.add(item.insertText)) {
+                            mentions.add(item to matchResult.score)
+                        }
                     }
                 }
             }
@@ -60,11 +66,9 @@ class FileMentionProvider(private val project: Project) : MentionProvider {
             log.debug("Error getting files from FilenameIndex: ${e.message}")
         }
 
-        // Sort by relevance: exact matches first, then by name length
-        return mentions.sortedWith(compareBy(
-            { !it.displayText.equals(query, ignoreCase = true) },
-            { it.displayText.length }
-        ))
+        // Sort by score (descending), then by name length
+        return mentions.sortedWith(compareBy({ -it.second }, { it.first.displayText.length }))
+            .map { it.first }
     }
 
     private fun createMentionItem(file: VirtualFile): MentionItem {
@@ -112,9 +116,5 @@ class FileMentionProvider(private val project: Project) : MentionProvider {
         }
     }
 
-    private fun matchesQuery(fileName: String, query: String): Boolean {
-        if (query.isEmpty()) return true
-        return fileName.contains(query, ignoreCase = true)
-    }
 }
 

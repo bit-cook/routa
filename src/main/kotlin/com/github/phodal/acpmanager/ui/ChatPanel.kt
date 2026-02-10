@@ -2,9 +2,11 @@ package com.github.phodal.acpmanager.ui
 
 import com.github.phodal.acpmanager.acp.AgentSession
 import com.github.phodal.acpmanager.acp.AgentSessionState
+import com.github.phodal.acpmanager.acp.MessageReference
 import com.github.phodal.acpmanager.config.AcpConfigService
 import com.github.phodal.acpmanager.ide.IdeAcpClient
 import com.github.phodal.acpmanager.ui.completion.CompletionManager
+import com.github.phodal.acpmanager.ui.mention.MentionItem
 import com.github.phodal.acpmanager.ui.renderer.AcpEventRenderer
 import com.github.phodal.acpmanager.ui.renderer.AcpEventRendererRegistry
 import com.github.phodal.acpmanager.ui.renderer.DefaultRendererFactory
@@ -45,6 +47,7 @@ class ChatPanel(
     private val inputArea: JBTextArea
     private val inputToolbar: ChatInputToolbar
     private lateinit var completionManager: CompletionManager
+    private val insertedReferences = mutableListOf<MessageReference>()
 
     // Event-driven renderer
     private val renderer: AcpEventRenderer
@@ -78,8 +81,17 @@ class ChatPanel(
             emptyText.text = "Type your message here... (Shift+Enter for newline, Enter to send)"
         }
 
-        // Initialize completion manager
-        completionManager = CompletionManager(project, inputArea)
+        // Initialize completion manager with reference tracking callback
+        completionManager = CompletionManager(project, inputArea) { mentionItem ->
+            insertedReferences.add(
+                MessageReference(
+                    type = mentionItem.type.name.lowercase(),
+                    displayText = mentionItem.displayText,
+                    insertText = mentionItem.insertText,
+                    metadata = mentionItem.metadata
+                )
+            )
+        }
 
         inputArea.addKeyListener(object : KeyAdapter() {
             override fun keyPressed(e: KeyEvent) {
@@ -195,6 +207,10 @@ class ChatPanel(
         // Close any open completion popups
         completionManager.closeAllPopups()
 
+        // Capture references before clearing input
+        val referencesToSend = insertedReferences.toList()
+        insertedReferences.clear()
+
         inputArea.text = ""
 
         // Check if this is a slash command
@@ -227,8 +243,8 @@ class ChatPanel(
                     }
                 }
 
-                log.info("Sending message to agent '${session.agentKey}'...")
-                session.sendMessage(text)
+                log.info("Sending message to agent '${session.agentKey}' with ${referencesToSend.size} references...")
+                session.sendMessage(text, referencesToSend)
                 log.info("Message sent to agent '${session.agentKey}'")
             } catch (e: Exception) {
                 log.warn("Failed to send message to '${session.agentKey}'", e)

@@ -108,6 +108,20 @@ class BuiltinSlashCommands(
         return SlashCommand(
             name = "files",
             description = "List open files",
+            parameters = listOf(
+                CommandParameter(
+                    name = "filter",
+                    description = "Filter files by extension (e.g., .kt, .java)",
+                    required = false,
+                    autocomplete = { listOf(".kt", ".java", ".py", ".js", ".ts", ".go", ".rs") }
+                ),
+                CommandParameter(
+                    name = "limit",
+                    description = "Maximum number of files to show",
+                    required = false,
+                    autocomplete = { listOf("5", "10", "20", "50") }
+                )
+            ),
             execute = {
                 val ideClient = com.github.phodal.acpmanager.ide.IdeAcpClient.getInstance(project)
                 val result = ideClient.ideTools.getOpenFiles()
@@ -128,11 +142,22 @@ class BuiltinSlashCommands(
 }
 
 /**
+ * Represents a parameter for a slash command.
+ */
+data class CommandParameter(
+    val name: String,
+    val description: String,
+    val required: Boolean = false,
+    val autocomplete: (() -> List<String>)? = null,
+)
+
+/**
  * Represents a slash command.
  */
 data class SlashCommand(
     val name: String,
     val description: String,
+    val parameters: List<CommandParameter> = emptyList(),
     val execute: () -> Unit,
 )
 
