@@ -104,7 +104,8 @@ class RoutaOrchestrator(
             for ((crafterId, taskId) in delegations) {
                 emitPhase(OrchestratorPhase.CrafterRunning(crafterId, taskId))
 
-                val context = routa.coordinator.buildAgentContext(crafterId) ?: continue
+                val taskContext = routa.coordinator.buildAgentContext(crafterId) ?: continue
+                val context = injectAgentIdentity(taskContext, crafterId, taskId)
                 val crafterOutput = runner.run(AgentRole.CRAFTER, crafterId, context)
 
                 // Ensure the CRAFTER's work is reported
@@ -126,7 +127,11 @@ class RoutaOrchestrator(
             }
 
             val gateContext = buildGateContext(gateAgentId)
-            val gateOutput = runner.run(AgentRole.GATE, gateAgentId, gateContext)
+            // Find the first review task for the gate to report on
+            val reviewTasks = routa.context.taskStore.listByStatus(workspaceId, TaskStatus.REVIEW_REQUIRED)
+            val gateTaskId = reviewTasks.firstOrNull()?.id ?: ""
+            val gateContextWithIdentity = injectAgentIdentity(gateContext, gateAgentId, gateTaskId)
+            val gateOutput = runner.run(AgentRole.GATE, gateAgentId, gateContextWithIdentity)
 
             // Ensure the GATE's verdict is reported
             ensureGateReport(gateAgentId, gateOutput)
@@ -167,6 +172,32 @@ class RoutaOrchestrator(
         } else {
             emitPhase(OrchestratorPhase.MaxWavesReached(maxWaves))
             OrchestratorResult.MaxWavesReached(maxWaves, routa.coordinator.getTaskSummary())
+        }
+    }
+
+    // ── Identity injection ────────────────────────────────────────────
+
+    /**
+     * Inject the agent's identity (agentId, taskId) into the prompt so the LLM
+     * knows what values to pass when calling tools like `report_to_parent`.
+     */
+    private fun injectAgentIdentity(prompt: String, agentId: String, taskId: String): String {
+        return buildString {
+            appendLine("## Your Identity")
+            appendLine()
+            appendLine("- **Your Agent ID**: `$agentId`")
+            appendLine("- **Your Task ID**: `$taskId`")
+            appendLine("- **Workspace**: `$workspaceId`")
+            appendLine()
+            appendLine("When calling `report_to_parent`, use agentId=`$agentId` and taskId=`$taskId`.")
+            appendLine()
+            appendLine("**IMPORTANT**: You are a text-based agent. You do NOT have access to a file system")
+            appendLine("or shell commands. Focus on describing what SHOULD be implemented, then call")
+            appendLine("`report_to_parent` with your findings/output.")
+            appendLine()
+            appendLine("---")
+            appendLine()
+            append(prompt)
         }
     }
 

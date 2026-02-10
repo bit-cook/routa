@@ -26,9 +26,31 @@ class KoogAgentRunner(
     }
 
     override suspend fun run(role: AgentRole, agentId: String, prompt: String): String {
-        val agent = factory.createAgent(role, modelConfig)
+        // ROUTA only produces text (plans), no tool calls needed — use lower iterations
+        // CRAFTER/GATE need tool calls (report_to_parent) — use moderate iterations
+        val maxIterations = when (role) {
+            AgentRole.ROUTA -> 5
+            AgentRole.CRAFTER -> 10
+            AgentRole.GATE -> 10
+        }
+
+        val agent = factory.createAgent(
+            role = role,
+            modelConfig = modelConfig,
+            maxIterations = maxIterations,
+        )
+
         return try {
             agent.run(prompt)
+        } catch (e: Exception) {
+            // If agent hits max iterations, return whatever it produced
+            if (e.message?.contains("maxAgentIterations", ignoreCase = true) == true ||
+                e.message?.contains("number of steps", ignoreCase = true) == true
+            ) {
+                "[Agent reached max iterations. Partial output may be available.]"
+            } else {
+                throw e
+            }
         } finally {
             agent.close()
         }

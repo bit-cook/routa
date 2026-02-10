@@ -1,6 +1,7 @@
 package com.phodal.routa.core.koog
 
 import ai.koog.agents.core.agent.AIAgent
+import ai.koog.prompt.executor.clients.deepseek.DeepSeekLLMClient
 import ai.koog.prompt.executor.llms.SingleLLMPromptExecutor
 import ai.koog.prompt.executor.llms.all.*
 import ai.koog.prompt.llm.LLMCapability
@@ -43,6 +44,8 @@ class RoutaAgentFactory(
     fun createAgent(
         role: AgentRole,
         modelConfig: NamedModelConfig? = null,
+        maxIterations: Int = 15,
+        systemPromptOverride: String? = null,
     ): AIAgent<String, String> {
         val config = modelConfig ?: RoutaConfigLoader.getActiveModelConfig()
             ?: throw IllegalStateException(
@@ -58,8 +61,9 @@ class RoutaAgentFactory(
         return AIAgent(
             promptExecutor = executor,
             llmModel = model,
-            systemPrompt = roleDefinition.systemPrompt,
+            systemPrompt = systemPromptOverride ?: roleDefinition.systemPrompt,
             toolRegistry = toolRegistry,
+            maxIterations = maxIterations,
         )
     }
 
@@ -74,7 +78,7 @@ class RoutaAgentFactory(
             LLMProviderType.OPENAI -> simpleOpenAIExecutor(config.apiKey)
             LLMProviderType.ANTHROPIC -> simpleAnthropicExecutor(config.apiKey)
             LLMProviderType.GOOGLE -> simpleGoogleAIExecutor(config.apiKey)
-            LLMProviderType.DEEPSEEK -> simpleOpenAIExecutor(config.apiKey)
+            LLMProviderType.DEEPSEEK -> SingleLLMPromptExecutor(DeepSeekLLMClient(config.apiKey))
             LLMProviderType.OLLAMA -> simpleOllamaAIExecutor(
                 baseUrl = config.baseUrl.ifEmpty { "http://localhost:11434" }
             )
@@ -93,19 +97,33 @@ class RoutaAgentFactory(
             LLMProviderType.OPENAI -> LLMProvider.OpenAI
             LLMProviderType.ANTHROPIC -> LLMProvider.Anthropic
             LLMProviderType.GOOGLE -> LLMProvider.Google
-            LLMProviderType.DEEPSEEK -> LLMProvider.OpenAI
-            LLMProviderType.OLLAMA -> LLMProvider.OpenAI
-            LLMProviderType.OPENROUTER -> LLMProvider.OpenAI
+            LLMProviderType.DEEPSEEK -> LLMProvider.DeepSeek
+            LLMProviderType.OLLAMA -> LLMProvider.Ollama
+            LLMProviderType.OPENROUTER -> LLMProvider.OpenRouter
+        }
+
+        // Context/output lengths per provider
+        val (contextLength, maxOutputTokens) = when (provider) {
+            LLMProviderType.DEEPSEEK -> when {
+                config.model.contains("reasoner") -> 64_000L to 64_000L
+                else -> 64_000L to 8_000L
+            }
+            LLMProviderType.ANTHROPIC -> 200_000L to 8_192L
+            LLMProviderType.GOOGLE -> 1_000_000L to 8_192L
+            else -> config.maxTokens.toLong() to 4_096L
         }
 
         return LLModel(
             provider = llmProvider,
             id = config.model,
             capabilities = listOf(
+                LLMCapability.Completion,
                 LLMCapability.Temperature,
                 LLMCapability.Tools,
+                LLMCapability.ToolChoice,
             ),
-            contextLength = config.maxTokens.toLong(),
+            contextLength = contextLength,
+            maxOutputTokens = maxOutputTokens,
         )
     }
 }

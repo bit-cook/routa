@@ -10,6 +10,7 @@ kotlinxSerialization = "1.8.1"
 kotlinxIo = "0.8.0"
 snakeyaml = "2.4"
 kaml = "0.77.0"
+slf4j = "2.0.16"
 ktor = "3.0.3"
 
 # plugins
@@ -30,6 +31,7 @@ koog-agents = { module = "ai.koog:koog-agents", version.ref = "koog" }
 koog-agents-mcp = { module = "ai.koog:agents-mcp", version.ref = "koog" }
 koog-prompt-executor = { module = "ai.koog:prompt-executor-llms-all", version.ref = "koog" }
 kaml = { module = "com.charleskorn.kaml:kaml", version.ref = "kaml" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
 kotlinx-coroutines-swing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "kotlinxCoroutines" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
