@@ -169,7 +169,25 @@ sealed class RenderEvent {
         val stopReason: String?,
         override val timestamp: Long = System.currentTimeMillis(),
     ) : RenderEvent()
+
+    /**
+     * Task status update - emitted for UI components outside the renderer
+     * (e.g., task status panel above input area).
+     */
+    data class TaskUpdate(
+        val tasks: List<TaskItem>,
+        override val timestamp: Long = System.currentTimeMillis(),
+    ) : RenderEvent()
 }
+
+/**
+ * A task item for TaskUpdate event.
+ */
+data class TaskItem(
+    val id: String,
+    val title: String,
+    val status: ToolCallStatus,
+)
 
 /**
  * A plan entry for PlanUpdate event.

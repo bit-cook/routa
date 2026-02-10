@@ -66,6 +66,7 @@ class DefaultAcpEventRenderer(
             is RenderEvent.Connected -> addInfo("Connected to '$agentKey'", event.timestamp)
             is RenderEvent.Disconnected -> addInfo("Disconnected from '$agentKey'", event.timestamp)
             is RenderEvent.PromptComplete -> finalizeStreaming()
+            is RenderEvent.TaskUpdate -> { /* TaskUpdate is handled by ChatPanel, not the renderer */ }
         }
         scrollCallback()
     }

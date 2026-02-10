@@ -46,6 +46,7 @@ class ChatPanel(
     private val scrollPane: JBScrollPane
     private val inputArea: JBTextArea
     private val inputToolbar: ChatInputToolbar
+    private val taskStatusPanel: TaskStatusPanel
     private lateinit var completionManager: CompletionManager
     private val insertedReferences = mutableListOf<MessageReference>()
 
@@ -58,11 +59,12 @@ class ChatPanel(
             AcpEventRendererRegistry.setDefaultFactory(DefaultRendererFactory())
         }
 
-        // Create renderer with scroll callback
+        // Create renderer with scroll callback and event callback for task updates
         renderer = AcpEventRendererRegistry.createRenderer(
             agentKey = session.agentKey,
             agentType = agentType,
-            scrollCallback = { scrollToBottom() }
+            scrollCallback = { scrollToBottom() },
+            eventCallback = { event -> handleRendererEvent(event) }
         )
 
         // Messages area using renderer's container
@@ -114,9 +116,15 @@ class ChatPanel(
             onStopClick = { cancelMessage() }
         )
 
+        // Task status panel (above input area)
+        taskStatusPanel = TaskStatusPanel()
+
         // Input panel layout
         val inputPanel = JPanel(BorderLayout()).apply {
             border = JBUI.Borders.customLineTop(JBColor.border())
+
+            // Task status at top (hidden by default)
+            add(taskStatusPanel, BorderLayout.NORTH)
 
             // Text input in center
             add(JBScrollPane(inputArea).apply {
@@ -147,6 +155,24 @@ class ChatPanel(
         SwingUtilities.invokeLater {
             val bar = scrollPane.verticalScrollBar
             bar.value = bar.maximum
+        }
+    }
+
+    /**
+     * Handle events emitted by the renderer (e.g., TaskUpdate).
+     * These events are used to update UI components outside the renderer.
+     */
+    private fun handleRendererEvent(event: RenderEvent) {
+        when (event) {
+            is RenderEvent.TaskUpdate -> {
+                log.info("ChatPanel: Received TaskUpdate with ${event.tasks.size} tasks")
+                ApplicationManager.getApplication().invokeLater {
+                    taskStatusPanel.updateTasks(event.tasks)
+                }
+            }
+            else -> {
+                // Other events are handled by the renderer itself
+            }
         }
     }
 

@@ -65,9 +65,14 @@ interface AcpEventRendererFactory {
      *
      * @param agentKey The agent identifier
      * @param scrollCallback Callback to trigger scroll to bottom
+     * @param eventCallback Optional callback for events emitted by the renderer (e.g., TaskUpdate)
      * @return A new renderer instance
      */
-    fun createRenderer(agentKey: String, scrollCallback: () -> Unit): AcpEventRenderer
+    fun createRenderer(
+        agentKey: String,
+        scrollCallback: () -> Unit,
+        eventCallback: ((RenderEvent) -> Unit)? = null
+    ): AcpEventRenderer
 }
 
 /**
@@ -103,10 +108,15 @@ object AcpEventRendererRegistry {
     /**
      * Create a renderer for the given agent.
      */
-    fun createRenderer(agentKey: String, agentType: String, scrollCallback: () -> Unit): AcpEventRenderer {
+    fun createRenderer(
+        agentKey: String,
+        agentType: String,
+        scrollCallback: () -> Unit,
+        eventCallback: ((RenderEvent) -> Unit)? = null
+    ): AcpEventRenderer {
         val factory = getFactory(agentType)
             ?: throw IllegalStateException("No renderer factory registered for agent type: $agentType")
-        return factory.createRenderer(agentKey, scrollCallback)
+        return factory.createRenderer(agentKey, scrollCallback, eventCallback)
     }
 }
 

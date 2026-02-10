@@ -4,7 +4,11 @@ package com.github.phodal.acpmanager.ui.renderer
  * Default factory for creating AcpEventRenderer instances.
  */
 class DefaultRendererFactory : AcpEventRendererFactory {
-    override fun createRenderer(agentKey: String, scrollCallback: () -> Unit): AcpEventRenderer {
+    override fun createRenderer(
+        agentKey: String,
+        scrollCallback: () -> Unit,
+        eventCallback: ((RenderEvent) -> Unit)?
+    ): AcpEventRenderer {
         return DefaultAcpEventRenderer(agentKey, scrollCallback)
     }
 }

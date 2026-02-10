@@ -20,6 +20,7 @@ private val log = logger<ClaudeCodeRenderer>()
  * - Collapsible tool call and task panels
  * - Unified background colors
  * - Easy to extend with new event handlers
+ * - Event emission for external UI components (e.g., task status above input)
  *
  * Architecture:
  * - RenderContext: Shared state and utilities
@@ -29,6 +30,7 @@ private val log = logger<ClaudeCodeRenderer>()
 class ClaudeCodeRenderer(
     private val agentKey: String,
     private val scrollCallback: () -> Unit,
+    private val eventCallback: ((RenderEvent) -> Unit)? = null,
 ) : AcpEventRenderer {
 
     // Inner content panel that holds actual messages
@@ -43,7 +45,7 @@ class ClaudeCodeRenderer(
     }
 
     // Shared context for all handlers
-    private val context = RenderContext(contentPanel, scrollCallback, agentKey)
+    private val context = RenderContext(contentPanel, scrollCallback, agentKey, eventCallback)
 
     // Task handler needs special handling for clear()
     private val taskHandler = TaskEventHandler()

@@ -5,11 +5,13 @@ import com.github.phodal.acpmanager.claudecode.context.RenderContext
 import com.github.phodal.acpmanager.claudecode.panels.TaskInfo
 import com.github.phodal.acpmanager.claudecode.panels.TaskSummaryPanel
 import com.github.phodal.acpmanager.ui.renderer.RenderEvent
+import com.github.phodal.acpmanager.ui.renderer.TaskItem
 import kotlin.reflect.KClass
 
 /**
  * Handler for Task tool calls.
  * Tasks are displayed in a collapsible summary panel at the top.
+ * Also emits TaskUpdate events for external UI components (e.g., task status above input).
  */
 class TaskEventHandler : MultiEventHandler() {
 
@@ -62,6 +64,7 @@ class TaskEventHandler : MultiEventHandler() {
         )
         tasks.add(taskInfo)
         updateTaskSummary(context)
+        emitTaskUpdate(context)
         context.scrollToBottom()
     }
 
@@ -73,6 +76,7 @@ class TaskEventHandler : MultiEventHandler() {
                 title = event.title ?: tasks[index].title
             )
             updateTaskSummary(context)
+            emitTaskUpdate(context)
         }
     }
 
@@ -84,6 +88,7 @@ class TaskEventHandler : MultiEventHandler() {
                 output = event.output
             )
             updateTaskSummary(context)
+            emitTaskUpdate(context)
         }
         context.scrollToBottom()
     }
@@ -104,6 +109,14 @@ class TaskEventHandler : MultiEventHandler() {
 
         context.contentPanel.revalidate()
         context.contentPanel.repaint()
+    }
+
+    /**
+     * Emit TaskUpdate event for external UI components.
+     */
+    private fun emitTaskUpdate(context: RenderContext) {
+        val taskItems = tasks.map { TaskItem(it.id, it.title, it.status) }
+        context.emitEvent(RenderEvent.TaskUpdate(taskItems))
     }
 
     /**

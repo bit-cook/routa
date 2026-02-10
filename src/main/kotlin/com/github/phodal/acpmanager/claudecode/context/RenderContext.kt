@@ -1,6 +1,7 @@
 package com.github.phodal.acpmanager.claudecode.context
 
 import com.github.phodal.acpmanager.claudecode.panels.RenderPanel
+import com.github.phodal.acpmanager.ui.renderer.RenderEvent
 import com.intellij.ui.JBColor
 import com.intellij.util.ui.UIUtil
 import java.awt.Color
@@ -13,7 +14,8 @@ import javax.swing.JPanel
 class RenderContext(
     val contentPanel: JPanel,
     val scrollCallback: () -> Unit,
-    val agentKey: String
+    val agentKey: String,
+    private val eventCallback: ((RenderEvent) -> Unit)? = null
 ) {
     // Panel registry for managing active panels
     val panelRegistry = PanelRegistry()
@@ -74,6 +76,14 @@ class RenderContext(
         currentThinkingSignature = null
         contentPanel.revalidate()
         contentPanel.repaint()
+    }
+
+    /**
+     * Emit an event to be consumed by external components (e.g., ChatPanel).
+     * This is used for events that need to update UI outside the renderer.
+     */
+    fun emitEvent(event: RenderEvent) {
+        eventCallback?.invoke(event)
     }
 }
 

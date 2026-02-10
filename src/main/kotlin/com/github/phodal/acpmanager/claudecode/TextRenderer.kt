@@ -91,6 +91,10 @@ class TextRenderer(
             is RenderEvent.Connected -> "[CONNECTED] ${event.agentKey}"
             is RenderEvent.Disconnected -> "[DISCONNECTED] ${event.agentKey}"
             is RenderEvent.PromptComplete -> "[COMPLETE] ${event.stopReason ?: "done"}"
+            is RenderEvent.TaskUpdate -> {
+                val tasks = event.tasks.joinToString(", ") { "${it.title}:${it.status}" }
+                "[TASKS] $tasks"
+            }
         }
     }
 
