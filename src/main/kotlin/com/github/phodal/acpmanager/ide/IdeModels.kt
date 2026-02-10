@@ -120,3 +120,11 @@ data class FileDiagnostics(
     val uri: String,
     val diagnostics: List<DiagnosticItem>,
 )
+
+/**
+ * Result of opening multiple files.
+ */
+@Serializable
+data class OpenedFilesResults(
+    val file_paths: List<String>,
+)

@@ -124,12 +124,12 @@ class IdeAcpClient(private val project: Project) : Disposable {
         ),
         ToolDefinition(
             name = "open_files",
-            description = "Opens the specified files in the IDE using their absolute file paths.",
+            description = "Opens the specified files in the IDE using their absolute file paths. Returns a JSON list of file paths that were successfully opened (input file paths not in the output list were not found).",
             parameters = mapOf("file_paths" to ToolParam("array", required = true))
         ),
         ToolDefinition(
             name = "close_tab",
-            description = "Closes a tab in the IDE, given either the tab_name or the absolute file path.",
+            description = "Closes a tab in the IDE, given either the tab_name used in openDiff or the absolute file path. Supports both regular file tabs and diff editor tabs.",
             parameters = mapOf("tab_name" to ToolParam("string", required = true))
         ),
         ToolDefinition(
