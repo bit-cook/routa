@@ -49,6 +49,8 @@ sealed class IdeNotification {
         val endLine: Int,
         val endColumn: Int,
         val selectedText: String?,
+        val cursorOffset: Int = 0,
+        val fileType: String? = null,
     ) : IdeNotification() {
         override val method = METHOD
         companion object {
@@ -87,13 +89,14 @@ sealed class IdeNotification {
  * Diagnostic severity levels, matching IntelliJ's HighlightSeverity.
  */
 enum class DiagnosticSeverity {
-    ERROR, WARNING, WEAK_WARNING, INFO;
+    ERROR, WARNING, WEAK_WARNING, INFO, HINT;
 
     companion object {
         fun from(name: String): DiagnosticSeverity = when (name.uppercase()) {
             "ERROR" -> ERROR
             "WARNING" -> WARNING
             "WEAK_WARNING", "WEAK WARNING" -> WEAK_WARNING
+            "HINT" -> HINT
             else -> INFO
         }
     }
@@ -119,4 +122,12 @@ data class DiagnosticItem(
 data class FileDiagnostics(
     val uri: String,
     val diagnostics: List<DiagnosticItem>,
+)
+
+/**
+ * Result of opening multiple files.
+ */
+@Serializable
+data class OpenedFilesResults(
+    val file_paths: List<String>,
 )
