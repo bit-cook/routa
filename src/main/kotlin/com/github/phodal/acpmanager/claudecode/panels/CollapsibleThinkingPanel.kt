@@ -13,13 +13,14 @@ import javax.swing.JTextArea
  * Modern, minimal panel for displaying thinking/reasoning content.
  *
  * Design principles:
- * - Collapsed by default with subtle appearance
+ * - Expanded while streaming to show thinking process
+ * - Collapses automatically when done
  * - No duplicate text - preview only shown when collapsed
  * - Clean, non-distracting gray styling
  */
 class CollapsibleThinkingPanel(
     accentColor: Color
-) : BaseCollapsiblePanel(accentColor, initiallyExpanded = false), StreamingPanel {
+) : BaseCollapsiblePanel(accentColor, initiallyExpanded = true), StreamingPanel {
 
     private val contentArea: JTextArea
     private val signatureLabel: JBLabel
@@ -82,6 +83,9 @@ class CollapsibleThinkingPanel(
             signatureLabel.text = "✓ ${it.take(8)}..."
             signatureLabel.isVisible = true
         }
+
+        // Collapse the panel when thinking is done
+        isExpanded = false
 
         revalidate()
         repaint()

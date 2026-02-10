@@ -92,6 +92,17 @@ class AcpManagerPanel(
                     selectedAgentKey = agentKey
                     welcomeToolbar?.refreshAllStatuses()
                 }
+
+                // Auto-connect to the first agent if available
+                if (agentKey != null) {
+                    log.info("Auto-connecting to agent '$agentKey' on startup")
+                    try {
+                        sessionManager.connectAgent(agentKey)
+                        log.info("Successfully auto-connected to agent '$agentKey'")
+                    } catch (e: Exception) {
+                        log.warn("Failed to auto-connect to agent '$agentKey': ${e.message}", e)
+                    }
+                }
             } catch (e: Exception) {
                 log.warn("Failed to load config: ${e.message}", e)
             }
