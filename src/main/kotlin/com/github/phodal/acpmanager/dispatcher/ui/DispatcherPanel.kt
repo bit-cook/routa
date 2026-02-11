@@ -317,6 +317,13 @@ class DispatcherPanel(
             }
         }
 
+        // Observe CRAFTER streaming chunks (for real-time output)
+        scope.launch {
+            routaService.crafterChunks.collect { (agentId, chunk) ->
+                crafterSection.appendChunk(agentId, chunk)
+            }
+        }
+
         // Observe CRAFTER states
         scope.launch {
             routaService.crafterStates.collectLatest { states ->

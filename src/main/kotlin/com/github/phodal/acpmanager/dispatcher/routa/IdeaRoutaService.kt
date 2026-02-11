@@ -49,6 +49,7 @@ data class CrafterStreamState(
  * - [phase] — current orchestration phase
  * - [coordinationState] — full coordination state from RoutaCoordinator
  * - [routaChunks] — streaming chunks from the ROUTA agent
+ * - [crafterChunks] — streaming chunks from CRAFTER agents (agentId, chunk)
  * - [crafterStates] — per-CRAFTER streaming state
  * - [gateChunks] — streaming chunks from the GATE agent
  * - [events] — all agent events for detailed logging
@@ -68,6 +69,9 @@ class IdeaRoutaService(private val project: Project) : Disposable {
 
     private val _gateChunks = MutableSharedFlow<StreamChunk>(extraBufferCapacity = 512)
     val gateChunks: SharedFlow<StreamChunk> = _gateChunks.asSharedFlow()
+
+    private val _crafterChunks = MutableSharedFlow<Pair<String, StreamChunk>>(extraBufferCapacity = 512)
+    val crafterChunks: SharedFlow<Pair<String, StreamChunk>> = _crafterChunks.asSharedFlow()
 
     private val _crafterStates = MutableStateFlow<Map<String, CrafterStreamState>>(emptyMap())
     val crafterStates: StateFlow<Map<String, CrafterStreamState>> = _crafterStates.asStateFlow()
@@ -384,6 +388,10 @@ class IdeaRoutaService(private val project: Project) : Disposable {
             AgentRole.ROUTA -> _routaChunks.tryEmit(chunk)
             AgentRole.GATE -> _gateChunks.tryEmit(chunk)
             AgentRole.CRAFTER -> {
+                // Emit chunk for real-time UI updates
+                _crafterChunks.tryEmit(agentId to chunk)
+
+                // Also update accumulated state
                 updateCrafterState(agentId) { current ->
                     val newOutput = when (chunk) {
                         is StreamChunk.Text -> current.outputText + chunk.content
