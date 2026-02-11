@@ -15,6 +15,15 @@ import com.phodal.routa.core.role.RouteDefinitions
 import com.phodal.routa.core.tool.AgentTools
 
 /**
+ * Holds executor and model for streaming LLM calls.
+ */
+data class LLMComponents(
+    val executor: SingleLLMPromptExecutor,
+    val model: LLModel,
+    val systemPrompt: String,
+)
+
+/**
  * Factory for creating Koog [AIAgent] instances configured for Routa roles.
  *
  * Reads LLM config from `~/.autodev/config.yaml` (xiuper-compatible),
@@ -26,6 +35,12 @@ import com.phodal.routa.core.tool.AgentTools
  * val factory = RoutaAgentFactory(routa.tools, "my-workspace")
  * val routaAgent = factory.createAgent(AgentRole.ROUTA)
  * val result = routaAgent.run("Implement user authentication for the API")
+ * ```
+ *
+ * For streaming, use [createLLMComponents] instead:
+ * ```kotlin
+ * val components = factory.createLLMComponents(AgentRole.ROUTA)
+ * components.executor.executeStreaming(prompt, components.model).collect { frame -> ... }
  * ```
  */
 class RoutaAgentFactory(
@@ -64,6 +79,47 @@ class RoutaAgentFactory(
             systemPrompt = systemPromptOverride ?: roleDefinition.systemPrompt,
             toolRegistry = toolRegistry,
             maxIterations = maxIterations,
+        )
+    }
+
+    /**
+     * Create LLM components for streaming execution.
+     *
+     * Use this instead of [createAgent] when you need streaming output:
+     * ```kotlin
+     * val components = factory.createLLMComponents(AgentRole.ROUTA)
+     * components.executor.executeStreaming(prompt, components.model).collect { frame ->
+     *     when (frame) {
+     *         is StreamFrame.Append -> onChunk(frame.text)
+     *         is StreamFrame.End -> onComplete()
+     *         else -> {}
+     *     }
+     * }
+     * ```
+     *
+     * @param role The agent role (for selecting system prompt).
+     * @param modelConfig Optional explicit model config (overrides config.yaml).
+     * @return LLMComponents containing executor, model, and system prompt.
+     */
+    fun createLLMComponents(
+        role: AgentRole,
+        modelConfig: NamedModelConfig? = null,
+        systemPromptOverride: String? = null,
+    ): LLMComponents {
+        val config = modelConfig ?: RoutaConfigLoader.getActiveModelConfig()
+            ?: throw IllegalStateException(
+                "No active model config found. Please configure ~/.autodev/config.yaml " +
+                    "(path: ${RoutaConfigLoader.getConfigPath()})"
+            )
+
+        val executor = createExecutor(config)
+        val model = createModel(config)
+        val roleDefinition = RouteDefinitions.forRole(role)
+
+        return LLMComponents(
+            executor = executor,
+            model = model,
+            systemPrompt = systemPromptOverride ?: roleDefinition.systemPrompt,
         )
     }
 

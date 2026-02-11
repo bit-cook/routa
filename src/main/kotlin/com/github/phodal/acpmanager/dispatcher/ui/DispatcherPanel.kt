@@ -106,6 +106,12 @@ class DispatcherPanel(
         // Wire up CRAFTER model change (ACP agent selection)
         crafterSection.onModelChanged = { model ->
             routaService.crafterModelKey.value = model
+
+            // Update ROUTA section status text to reflect new CRAFTER
+            val llmInfo = routaService.getActiveLlmConfig()?.let { config ->
+                "ROUTA: ${config.provider}/${config.model} (KoogAgent)"
+            } ?: "ROUTA: fallback to ACP"
+            routaSection.setPlanningText("✓ Ready. CRAFTER: $model | $llmInfo")
         }
 
         // Wire up ROUTA model change (LLM model selection for KoogAgent)
@@ -115,6 +121,11 @@ class DispatcherPanel(
             if (selected != null) {
                 routaService.setLlmModelConfig(selected)
                 log.info("ROUTA LLM model changed to: ${selected.provider}/${selected.model}")
+
+                // Update ROUTA section status text to reflect new LLM model
+                val crafterModel = routaService.crafterModelKey.value
+                val llmInfo = "ROUTA: ${selected.provider}/${selected.model} (KoogAgent)"
+                routaSection.setPlanningText("✓ Ready. CRAFTER: $crafterModel | $llmInfo")
             }
         }
     }

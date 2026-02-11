@@ -1,9 +1,13 @@
 package com.phodal.routa.core.provider
 
+import ai.koog.prompt.dsl.prompt
+import ai.koog.prompt.params.LLMParams
+import ai.koog.prompt.streaming.StreamFrame
 import com.phodal.routa.core.config.NamedModelConfig
 import com.phodal.routa.core.koog.RoutaAgentFactory
 import com.phodal.routa.core.model.AgentRole
 import com.phodal.routa.core.tool.AgentTools
+import kotlinx.coroutines.flow.cancellable
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -75,6 +79,52 @@ class KoogAgentProvider(
         }
     }
 
+    // ── AgentProvider: Streaming ───────────────────────────────────────
+
+    override suspend fun runStreaming(
+        role: AgentRole,
+        agentId: String,
+        prompt: String,
+        onChunk: (StreamChunk) -> Unit,
+    ): String {
+        val components = factory.createLLMComponents(role, modelConfig)
+        activeAgents[agentId] = RunningAgent(role)
+
+        val resultBuilder = StringBuilder()
+        onChunk(StreamChunk.Heartbeat())
+
+        return try {
+            val llmPrompt = prompt(id = "routa-$agentId") {
+                system(components.systemPrompt)
+                user(prompt)
+            }
+
+            components.executor.executeStreaming(llmPrompt, components.model)
+                .cancellable()
+                .collect { frame ->
+                    when (frame) {
+                        is StreamFrame.Append -> {
+                            resultBuilder.append(frame.text)
+                            onChunk(StreamChunk.Text(frame.text))
+                        }
+                        is StreamFrame.End -> {
+                            onChunk(StreamChunk.Completed(frame.finishReason ?: "end"))
+                        }
+                        is StreamFrame.ToolCall -> {
+                            onChunk(StreamChunk.ToolCall(frame.name, ToolCallStatus.IN_PROGRESS))
+                        }
+                    }
+                }
+
+            resultBuilder.toString()
+        } catch (e: Exception) {
+            onChunk(StreamChunk.Error(e.message ?: "Unknown error", recoverable = false))
+            throw e
+        } finally {
+            activeAgents.remove(agentId)
+        }
+    }
+
     // ── AgentProvider: Health Check ──────────────────────────────────
 
     override fun isHealthy(agentId: String): Boolean {
@@ -97,7 +147,7 @@ class KoogAgentProvider(
 
     override fun capabilities(): ProviderCapabilities = ProviderCapabilities(
         name = "Koog LLM",
-        supportsStreaming = false,
+        supportsStreaming = true, // Uses executor.executeStreaming() for real streaming
         supportsInterrupt = false, // Koog doesn't support mid-run cancel
         supportsHealthCheck = false,
         supportsFileEditing = false, // LLM can't edit files directly
