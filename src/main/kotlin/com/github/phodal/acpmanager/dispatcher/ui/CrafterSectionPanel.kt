@@ -16,36 +16,79 @@ import java.awt.*
 import javax.swing.*
 
 /**
- * CRAFTERs section — the main focus area of the DAG UI.
+ * CRAFTERs section — modern tab-based UI for the DAG panel.
  *
  * Shows:
- * - Header with "CRAFTERs" label, active count, and ACP model config
- * - Vertical list of all CRAFTER agents (all visible at once, not tabbed)
- * - Each CRAFTER shows a compact CrafterDetailPanel with task info and streaming output
+ * - Header with "CRAFTERs" label, active count, and ACP model selector
+ * - Tab bar with one tab per CRAFTER (status dot + task title)
+ * - Active tab's content: CrafterDetailPanel with streaming output
  *
- * This is the largest section since CRAFTERs do the actual implementation work.
+ * All tasks remain accessible via tabs even after completion,
+ * so the user can review any task's history.
  */
 class CrafterSectionPanel : JPanel(BorderLayout()) {
 
     companion object {
         val CRAFTER_ACCENT = JBColor(0x10B981, 0x10B981)
         val CRAFTER_BG = JBColor(0x0D1117, 0x0D1117)
+
+        // Status colors
+        val STATUS_ACTIVE = JBColor(0x3B82F6, 0x3B82F6)
+        val STATUS_COMPLETED = JBColor(0x10B981, 0x10B981)
+        val STATUS_ERROR = JBColor(0xEF4444, 0xEF4444)
+        val STATUS_CANCELLED = JBColor(0xF59E0B, 0xF59E0B)
+        val STATUS_PENDING = JBColor(0x6B7280, 0x6B7280)
+
+        // Tab styling
+        val TAB_BG = JBColor(0x161B22, 0x161B22)
+        val TAB_SELECTED_BG = JBColor(0x1C2333, 0x1C2333)
+        val TAB_HOVER_BG = JBColor(0x1A2030, 0x1A2030)
+        val TAB_BORDER = JBColor(0x30363D, 0x30363D)
+        val TAB_TEXT = JBColor(0x8B949E, 0x8B949E)
+        val TAB_TEXT_SELECTED = JBColor(0xC9D1D9, 0xC9D1D9)
     }
 
-    /** Vertical list panel to hold all CRAFTER detail panels */
-    private val crafterListPanel = JPanel().apply {
-        layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        isOpaque = false
+    // ── Tab bar ─────────────────────────────────────────────────────────
+
+    /** Horizontal tab bar with scroll support. */
+    private val tabBarPanel = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.X_AXIS)
+        isOpaque = true
+        background = TAB_BG
+        border = JBUI.Borders.customLineBottom(TAB_BORDER)
     }
 
-    /** Scrollable container for the CRAFTER list */
-    private val crafterScrollPane = JScrollPane(crafterListPanel).apply {
+    private val tabBarScroll = JScrollPane(tabBarPanel).apply {
         border = JBUI.Borders.empty()
-        verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
-        horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
-        isOpaque = false
-        viewport.isOpaque = false
+        verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_NEVER
+        horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED
+        isOpaque = true
+        viewport.isOpaque = true
+        viewport.background = TAB_BG
+        preferredSize = Dimension(0, 32)
     }
+
+    /** Content area where the active CrafterDetailPanel is shown. */
+    private val contentPanel = JPanel(CardLayout()).apply {
+        isOpaque = true
+        background = CRAFTER_BG
+    }
+
+    // ── State ───────────────────────────────────────────────────────────
+
+    /** Ordered list of agent IDs (insertion order preserved). */
+    private val agentOrder = mutableListOf<String>()
+
+    /** Maps agentId → tab button component. */
+    private val tabButtons = mutableMapOf<String, CrafterTabButton>()
+
+    /** Maps agentId → CrafterDetailPanel. */
+    private val detailPanels = mutableMapOf<String, CrafterDetailPanel>()
+
+    /** Currently selected agent ID. */
+    private var selectedAgentId: String? = null
+
+    // ── Header components ───────────────────────────────────────────────
 
     private val activeCountLabel = JBLabel("0 active").apply {
         foreground = JBColor(0x8B949E, 0x8B949E)
@@ -53,7 +96,7 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
     }
 
     private val mcpUrlLabel = JBLabel("").apply {
-        foreground = JBColor(0x58A6FF, 0x58A6FF)  // blue link-style
+        foreground = JBColor(0x58A6FF, 0x58A6FF)
         font = font.deriveFont(9f)
         toolTipText = "MCP Server SSE endpoint for Claude Code coordination tools"
         isVisible = false
@@ -71,13 +114,14 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
     /** Callback when a CRAFTER agent should be stopped. */
     var onStopCrafter: (String) -> Unit = {}
 
-    /** Maps agentId → CrafterDetailPanel for updating. */
-    private val detailPanels = mutableMapOf<String, CrafterDetailPanel>()
-
     /** Empty state label */
-    private val emptyLabel = JBLabel("Waiting for ROUTA to plan tasks...").apply {
-        foreground = JBColor(0x6B7280, 0x6B7280)
-        font = font.deriveFont(Font.ITALIC, 12f)
+    private val emptyPanel = JPanel(GridBagLayout()).apply {
+        isOpaque = true
+        background = CRAFTER_BG
+        add(JBLabel("Waiting for ROUTA to plan tasks...").apply {
+            foreground = JBColor(0x6B7280, 0x6B7280)
+            font = font.deriveFont(Font.ITALIC, 12f)
+        })
     }
 
     // DAG connectors
@@ -92,7 +136,8 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
             JBUI.Borders.empty(4, 12)
         )
 
-        // Header
+        // ── Header ──────────────────────────────────────────────────────
+
         val headerPanel = JPanel(BorderLayout()).apply {
             isOpaque = false
             border = JBUI.Borders.emptyBottom(4)
@@ -123,18 +168,23 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
             add(rightPanel, BorderLayout.EAST)
         }
 
-        // Initially show empty state
-        val emptyPanel = JPanel(GridBagLayout()).apply {
-            isOpaque = false
-            add(emptyLabel)
-        }
-        crafterListPanel.add(emptyPanel)
+        // ── Tab + Content ───────────────────────────────────────────────
 
-        // Layout: top connector + header + scrollable list + bottom connector
+        // Initially show empty state
+        contentPanel.add(emptyPanel, "__empty__")
+
+        val centerPanel = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(tabBarScroll, BorderLayout.NORTH)
+            add(contentPanel, BorderLayout.CENTER)
+        }
+
+        // ── Main layout ─────────────────────────────────────────────────
+
         val mainContent = JPanel(BorderLayout()).apply {
             isOpaque = false
             add(headerPanel, BorderLayout.NORTH)
-            add(crafterScrollPane, BorderLayout.CENTER)
+            add(centerPanel, BorderLayout.CENTER)
         }
 
         add(dagUpConnector, BorderLayout.NORTH)
@@ -147,6 +197,8 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
             onModelChanged(selected)
         }
     }
+
+    // ── Public API ──────────────────────────────────────────────────────
 
     /**
      * Set the MCP server URL to display.
@@ -180,7 +232,8 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
 
     /**
      * Update all CRAFTER states at once.
-     * Creates/updates panels in the vertical list as needed.
+     * Creates new tabs as needed, updates existing tabs.
+     * Auto-selects the first newly active tab.
      */
     fun updateCrafterStates(states: Map<String, CrafterStreamState>) {
         SwingUtilities.invokeLater {
@@ -188,36 +241,58 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
             val totalCount = states.size
             activeCountLabel.text = "$activeCount/$totalCount active"
 
-            // Remove empty state if crafters exist
-            if (states.isNotEmpty() && detailPanels.isEmpty()) {
-                crafterListPanel.removeAll()
-            }
+            var newActiveTab: String? = null
 
-            // Add or update panels in the list
             for ((agentId, state) in states) {
-                val existing = detailPanels[agentId]
-                if (existing != null) {
-                    existing.update(state)
-                } else {
-                    // Create new panel with stop callback
+                if (agentId !in agentOrder) {
+                    // ── New CRAFTER: create tab + detail panel ──
+                    agentOrder.add(agentId)
+
                     val panel = CrafterDetailPanel(
                         onStopClick = { onStopCrafter(agentId) }
                     )
                     panel.update(state)
                     detailPanels[agentId] = panel
-                    crafterListPanel.add(panel)
-                    crafterListPanel.add(Box.createVerticalStrut(4)) // spacing between panels
+
+                    val tab = CrafterTabButton(
+                        agentId = agentId,
+                        title = state.taskTitle.ifBlank { "Task ${agentOrder.size}" },
+                        onClick = { selectTab(agentId) }
+                    )
+                    tabButtons[agentId] = tab
+                    tabBarPanel.add(tab)
+
+                    contentPanel.add(panel, agentId)
+
+                    // Auto-select the first newly active crafter
+                    if (state.status == AgentStatus.ACTIVE && newActiveTab == null) {
+                        newActiveTab = agentId
+                    }
+                } else {
+                    // ── Existing CRAFTER: update state ──
+                    detailPanels[agentId]?.update(state)
+                    tabButtons[agentId]?.updateState(state.status, state.taskTitle)
+
+                    // Auto-select if this is newly active and nothing else is selected as active
+                    if (state.status == AgentStatus.ACTIVE && newActiveTab == null) {
+                        val currentSelected = selectedAgentId
+                        val currentState = currentSelected?.let { states[it] }
+                        if (currentState == null || currentState.status != AgentStatus.ACTIVE) {
+                            newActiveTab = agentId
+                        }
+                    }
                 }
             }
 
-            revalidate()
-            repaint()
-
-            // Scroll to bottom to show latest CRAFTER
-            SwingUtilities.invokeLater {
-                val vertical = crafterScrollPane.verticalScrollBar
-                vertical.value = vertical.maximum
+            // Auto-select logic: prefer newly active, fallback to first tab
+            if (newActiveTab != null) {
+                selectTab(newActiveTab)
+            } else if (selectedAgentId == null && agentOrder.isNotEmpty()) {
+                selectTab(agentOrder.first())
             }
+
+            tabBarPanel.revalidate()
+            tabBarPanel.repaint()
         }
     }
 
@@ -231,36 +306,50 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
     }
 
     /**
-     * Clear all panels and reset.
+     * Clear all tabs and reset.
      */
     fun clear() {
         SwingUtilities.invokeLater {
-            crafterListPanel.removeAll()
+            tabBarPanel.removeAll()
+            contentPanel.removeAll()
+
+            agentOrder.clear()
+            tabButtons.clear()
             detailPanels.clear()
+            selectedAgentId = null
+
             activeCountLabel.text = "0 active"
             mcpUrlLabel.text = ""
             mcpUrlLabel.isVisible = false
-            // Show empty state
-            val emptyPanel = JPanel(GridBagLayout()).apply {
-                isOpaque = false
-                add(JBLabel("Waiting for ROUTA to plan tasks...").apply {
-                    foreground = JBColor(0x6B7280, 0x6B7280)
-                    font = font.deriveFont(Font.ITALIC, 12f)
-                })
-            }
-            crafterListPanel.add(emptyPanel)
-            revalidate()
-            repaint()
+
+            // Restore empty state
+            contentPanel.add(emptyPanel, "__empty__")
+            (contentPanel.layout as CardLayout).show(contentPanel, "__empty__")
+
+            tabBarPanel.revalidate()
+            tabBarPanel.repaint()
+            contentPanel.revalidate()
+            contentPanel.repaint()
         }
     }
 
-    private fun getStatusIcon(status: AgentStatus): Icon = when (status) {
-        AgentStatus.ACTIVE -> AllIcons.Process.Step_1
-        AgentStatus.COMPLETED -> AllIcons.RunConfigurations.TestPassed
-        AgentStatus.ERROR -> AllIcons.RunConfigurations.TestFailed
-        AgentStatus.CANCELLED -> AllIcons.RunConfigurations.TestIgnored
-        AgentStatus.PENDING -> AllIcons.RunConfigurations.TestNotRan
+    // ── Tab Selection ───────────────────────────────────────────────────
+
+    private fun selectTab(agentId: String) {
+        selectedAgentId = agentId
+
+        // Update tab button visual state
+        for ((id, btn) in tabButtons) {
+            btn.isSelected = (id == agentId)
+        }
+
+        // Switch content card
+        (contentPanel.layout as CardLayout).show(contentPanel, agentId)
+
+        tabBarPanel.repaint()
     }
+
+    // ── DAG Connector ───────────────────────────────────────────────────
 
     private fun createDagConnector(): JPanel {
         return object : JPanel() {
@@ -281,10 +370,130 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Tab Button Component
+// ═══════════════════════════════════════════════════════════════════════════
+
 /**
- * Individual CRAFTER detail panel — shown inside a tab.
+ * Custom tab button with status dot and task title.
+ * Looks like a modern IDE tab with colored status indicator.
+ */
+private class CrafterTabButton(
+    val agentId: String,
+    title: String,
+    private val onClick: () -> Unit,
+) : JPanel(BorderLayout()) {
+
+    private val statusDot = JBLabel("●").apply {
+        foreground = CrafterSectionPanel.STATUS_PENDING
+        font = font.deriveFont(8f)
+    }
+
+    private val titleLabel = JBLabel(truncateTitle(title)).apply {
+        foreground = CrafterSectionPanel.TAB_TEXT
+        font = font.deriveFont(11f)
+    }
+
+    var isSelected: Boolean = false
+        set(value) {
+            field = value
+            updateVisuals()
+        }
+
+    init {
+        isOpaque = true
+        background = CrafterSectionPanel.TAB_BG
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createMatteBorder(0, 0, 0, 1, CrafterSectionPanel.TAB_BORDER),
+            JBUI.Borders.empty(4, 10, 4, 10)
+        )
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        maximumSize = Dimension(220, 32)
+
+        add(statusDot, BorderLayout.WEST)
+        add(Box.createHorizontalStrut(6).also {
+            val spacer = JPanel().apply {
+                isOpaque = false
+                preferredSize = Dimension(6, 0)
+            }
+            add(spacer, BorderLayout.CENTER) // dummy, won't show
+        })
+
+        val innerPanel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
+            isOpaque = false
+            add(statusDot)
+            add(titleLabel)
+        }
+        removeAll()
+        add(innerPanel, BorderLayout.CENTER)
+
+        addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mouseClicked(e: java.awt.event.MouseEvent) {
+                onClick()
+            }
+
+            override fun mouseEntered(e: java.awt.event.MouseEvent) {
+                if (!isSelected) {
+                    background = CrafterSectionPanel.TAB_HOVER_BG
+                }
+            }
+
+            override fun mouseExited(e: java.awt.event.MouseEvent) {
+                updateVisuals()
+            }
+        })
+    }
+
+    fun updateState(status: AgentStatus, taskTitle: String) {
+        statusDot.foreground = statusColor(status)
+        if (taskTitle.isNotBlank()) {
+            titleLabel.text = truncateTitle(taskTitle)
+        }
+        updateVisuals()
+    }
+
+    private fun updateVisuals() {
+        background = if (isSelected) CrafterSectionPanel.TAB_SELECTED_BG else CrafterSectionPanel.TAB_BG
+        titleLabel.foreground = if (isSelected) CrafterSectionPanel.TAB_TEXT_SELECTED else CrafterSectionPanel.TAB_TEXT
+
+        // Show bottom accent bar on selected tab
+        border = if (isSelected) {
+            BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 2, 1, CrafterSectionPanel.CRAFTER_ACCENT),
+                JBUI.Borders.empty(4, 10, 2, 10)
+            )
+        } else {
+            BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 0, 1, CrafterSectionPanel.TAB_BORDER),
+                JBUI.Borders.empty(4, 10, 4, 10)
+            )
+        }
+    }
+
+    private fun statusColor(status: AgentStatus): Color = when (status) {
+        AgentStatus.ACTIVE -> CrafterSectionPanel.STATUS_ACTIVE
+        AgentStatus.COMPLETED -> CrafterSectionPanel.STATUS_COMPLETED
+        AgentStatus.ERROR -> CrafterSectionPanel.STATUS_ERROR
+        AgentStatus.CANCELLED -> CrafterSectionPanel.STATUS_CANCELLED
+        AgentStatus.PENDING -> CrafterSectionPanel.STATUS_PENDING
+    }
+
+    companion object {
+        private fun truncateTitle(title: String): String {
+            val clean = title.trim()
+            return if (clean.length > 28) clean.take(25) + "..." else clean
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CrafterDetailPanel (tab content)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Individual CRAFTER detail panel — shown as tab content.
  *
- * Uses [ClaudeCodeRenderer] to properly render streaming events (thinking, tool calls, messages)
+ * Uses [CrafterRenderer] to properly render streaming events (thinking, tool calls, messages)
  * with the same high-quality rendering used in the main chat panel.
  *
  * Shows:
@@ -353,7 +562,7 @@ class CrafterDetailPanel(
 
     private var detailsExpanded = false
 
-    // ── Renderer-based output (replaces manual thinking/toolCall/output panels) ──
+    // ── Renderer-based output ───────────────────────────────────────────
 
     private val rendererScroll: JScrollPane
 
@@ -430,7 +639,7 @@ class CrafterDetailPanel(
             }
         })
 
-        // Top section: info + progress + details only (no thinking/toolCall/completion — renderer handles those)
+        // Top section: info + progress + details
         val topSection = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             isOpaque = false
@@ -485,7 +694,7 @@ class CrafterDetailPanel(
      * Append a streaming chunk to the output.
      *
      * Converts [StreamChunk] (from routa-core) to [RenderEvent] and dispatches
-     * to the embedded [ClaudeCodeRenderer] for proper rendering of thinking,
+     * to the embedded [CrafterRenderer] for proper rendering of thinking,
      * tool calls, messages, etc.
      */
     fun appendChunk(chunk: StreamChunk) {
@@ -556,7 +765,6 @@ class CrafterDetailPanel(
                         kind = null,
                     )
                 )
-                // Send parameters if available
                 chunk.arguments?.let { args ->
                     renderer.onEvent(
                         RenderEvent.ToolCallParameterUpdate(
@@ -576,7 +784,6 @@ class CrafterDetailPanel(
                         title = chunk.name,
                     )
                 )
-                // Update parameters if available
                 chunk.arguments?.let { args ->
                     renderer.onEvent(
                         RenderEvent.ToolCallParameterUpdate(
@@ -617,7 +824,6 @@ class CrafterDetailPanel(
 
     /**
      * Finalize any in-progress message streaming.
-     * Called before switching to thinking, tool call, or completion events.
      */
     private fun finalizeMessage() {
         if (messageStarted) {

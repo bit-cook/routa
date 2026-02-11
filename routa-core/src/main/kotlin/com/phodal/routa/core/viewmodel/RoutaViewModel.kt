@@ -47,7 +47,8 @@ import kotlinx.coroutines.flow.*
  *   ├── RoutaSystem (stores, coordinator, event bus)
  *   ├── RoutaOrchestrator (ROUTA → CRAFTER → GATE flow)
  *   ├── AgentProvider (pluggable: ACP, Koog, Claude, mock)
- *   └── Observable State (phase, chunks, crafter states, result)
+ *   ├── Observable State (phase, chunks, crafter states, result)
+ *   └── DebugLog (structured trace for troubleshooting)
  * ```
  *
  * @param scope The coroutine scope for background work. The caller owns the scope's lifecycle.
@@ -90,6 +91,11 @@ class RoutaViewModel(
     /** The result of the last orchestration (null if none has completed). */
     val result: StateFlow<OrchestratorResult?> = _result.asStateFlow()
 
+    // ── Debug Log ───────────────────────────────────────────────────────
+
+    /** Structured debug log for tracing orchestration flow. */
+    val debugLog = RoutaDebugLog()
+
     // ── Internal State ──────────────────────────────────────────────────
 
     private var routaSystem: RoutaSystem? = null
@@ -97,7 +103,10 @@ class RoutaViewModel(
     private var provider: AgentProvider? = null
     private var eventListenerJob: Job? = null
 
-    /** Track agentId → role for routing stream chunks. */
+    /** The currently running execution job — used for cancellation on stop. */
+    private var executionJob: Job? = null
+
+    /** Track agentId → role for routing stream chunks AND for stop-all. */
     private val agentRoleMap = mutableMapOf<String, AgentRole>()
 
     /** Track crafterId → taskId mapping. */
@@ -186,6 +195,12 @@ class RoutaViewModel(
                 _events.tryEmit(event)
             }
         }
+
+        debugLog.log(DebugCategory.PHASE, "ViewModel initialized", mapOf(
+            "workspaceId" to workspaceId,
+            "provider" to provider.capabilities().name,
+            "systemProvided" to (system != null).toString(),
+        ))
     }
 
     /**
@@ -220,15 +235,37 @@ class RoutaViewModel(
             userRequest
         }
 
+        debugLog.log(DebugCategory.PHASE, "Execution starting", mapOf(
+            "userRequest" to userRequest.take(200),
+            "enhancedPrompt" to useEnhancedRoutaPrompt.toString(),
+        ))
+
         return try {
-            val result = orch.execute(request)
+            // Store the execution as a job so stopExecution() can cancel it
+            val result = coroutineScope {
+                val job = async { orch.execute(request) }
+                executionJob = job
+                job.await()
+            }
+
+            debugLog.log(DebugCategory.PHASE, "Execution completed", mapOf(
+                "result" to result::class.simpleName.orEmpty(),
+            ))
+
             _result.value = result
             result
+        } catch (e: CancellationException) {
+            debugLog.log(DebugCategory.STOP, "Execution cancelled by user")
+            val cancelledResult = OrchestratorResult.Failed("Execution cancelled by user")
+            _result.value = cancelledResult
+            cancelledResult
         } catch (e: Exception) {
+            debugLog.log(DebugCategory.ERROR, "Execution failed: ${e.message}")
             val failedResult = OrchestratorResult.Failed(e.message ?: "Unknown error")
             _result.value = failedResult
             failedResult
         } finally {
+            executionJob = null
             _isRunning.value = false
         }
     }
@@ -236,31 +273,51 @@ class RoutaViewModel(
     /**
      * Stop all running agents and cancel the current execution.
      *
-     * Interrupts all active CRAFTER agents, marks them as CANCELLED,
-     * and resets the ViewModel to its initial state.
+     * This method:
+     * 1. Cancels the running execution coroutine (stops the orchestrator loop)
+     * 2. Interrupts ALL known agents (ROUTA, CRAFTERs, GATE — not just active CRAFTERs)
+     * 3. Updates crafter states to CANCELLED
      */
     fun stopExecution() {
         if (!_isRunning.value) return
 
-        scope.launch {
-            try {
-                // Interrupt all active CRAFTER agents
-                val activeAgents = _crafterStates.value.filter { it.value.status == AgentStatus.ACTIVE }
-                for ((agentId, _) in activeAgents) {
-                    try {
-                        provider?.interrupt(agentId)
-                        updateCrafterState(agentId) { current ->
-                            current.copy(status = AgentStatus.CANCELLED)
-                        }
-                    } catch (_: Exception) {
-                        // Best effort
-                    }
-                }
+        debugLog.log(DebugCategory.STOP, "Stop requested", mapOf(
+            "knownAgents" to agentRoleMap.size.toString(),
+            "activeCrafters" to _crafterStates.value.count { it.value.status == AgentStatus.ACTIVE }.toString(),
+        ))
 
-                resetInternal()
-            } catch (_: Exception) {
-                // Best effort
+        // 1. Cancel the execution coroutine FIRST (stops the orchestrator loop)
+        executionJob?.cancel()
+        executionJob = null
+
+        // 2. Interrupt ALL known agents (not just crafters with ACTIVE status)
+        scope.launch {
+            val currentProvider = provider ?: return@launch
+
+            for ((agentId, role) in agentRoleMap.toMap()) {
+                try {
+                    currentProvider.interrupt(agentId)
+                    debugLog.log(DebugCategory.STOP, "Interrupted agent", mapOf(
+                        "agentId" to agentId.take(8),
+                        "role" to role.name,
+                    ))
+                } catch (e: Exception) {
+                    debugLog.log(DebugCategory.STOP, "Failed to interrupt agent: ${e.message}", mapOf(
+                        "agentId" to agentId.take(8),
+                        "role" to role.name,
+                    ))
+                }
             }
+
+            // 3. Mark all active crafters as CANCELLED
+            val activeAgents = _crafterStates.value.filter { it.value.status == AgentStatus.ACTIVE }
+            for ((agentId, _) in activeAgents) {
+                updateCrafterState(agentId) { current ->
+                    current.copy(status = AgentStatus.CANCELLED)
+                }
+            }
+
+            _isRunning.value = false
         }
     }
 
@@ -270,6 +327,7 @@ class RoutaViewModel(
      * @param agentId The agent ID to interrupt.
      */
     fun stopCrafter(agentId: String) {
+        debugLog.log(DebugCategory.STOP, "Stopping single crafter", mapOf("agentId" to agentId.take(8)))
         scope.launch {
             try {
                 provider?.interrupt(agentId)
@@ -303,6 +361,10 @@ class RoutaViewModel(
     // ── Internal reset ──────────────────────────────────────────────────
 
     private fun resetInternal() {
+        // Cancel any running execution
+        executionJob?.cancel()
+        executionJob = null
+
         eventListenerJob?.cancel()
         eventListenerJob = null
 
@@ -326,7 +388,50 @@ class RoutaViewModel(
     private suspend fun handlePhaseChange(phase: OrchestratorPhase) {
         _phase.value = phase
 
+        // Debug log every phase transition with details
         when (phase) {
+            is OrchestratorPhase.Initializing -> {
+                debugLog.log(DebugCategory.PHASE, "Phase: Initializing")
+            }
+
+            is OrchestratorPhase.Planning -> {
+                debugLog.log(DebugCategory.PHASE, "Phase: Planning (ROUTA starting)")
+            }
+
+            is OrchestratorPhase.PlanReady -> {
+                debugLog.log(DebugCategory.PLAN, "ROUTA plan output", mapOf(
+                    "outputLength" to phase.planOutput.length.toString(),
+                    "preview" to phase.planOutput.take(500),
+                ))
+
+                // Log parsed tasks from the plan
+                val taskStore = routaSystem?.context?.taskStore
+                val workspaceId = routaSystem?.coordinator?.coordinationState?.value?.workspaceId ?: ""
+                val tasks = taskStore?.listByWorkspace(workspaceId)
+                if (!tasks.isNullOrEmpty()) {
+                    for ((index, task) in tasks.withIndex()) {
+                        debugLog.log(DebugCategory.TASK, "Parsed task #${index + 1}", mapOf(
+                            "taskId" to task.id.take(8),
+                            "title" to task.title,
+                            "status" to task.status.name,
+                            "objective" to task.objective.take(200),
+                        ))
+                    }
+                }
+            }
+
+            is OrchestratorPhase.TasksRegistered -> {
+                debugLog.log(DebugCategory.TASK, "Tasks registered", mapOf(
+                    "count" to phase.count.toString(),
+                ))
+            }
+
+            is OrchestratorPhase.WaveStarting -> {
+                debugLog.log(DebugCategory.PHASE, "Wave starting", mapOf(
+                    "wave" to phase.wave.toString(),
+                ))
+            }
+
             is OrchestratorPhase.CrafterRunning -> {
                 agentRoleMap[phase.crafterId] = AgentRole.CRAFTER
                 crafterTaskMap[phase.crafterId] = phase.taskId
@@ -348,6 +453,12 @@ class RoutaViewModel(
                 // Cache the title for updateCrafterState fallback
                 crafterTitleMap[phase.crafterId] = title
 
+                debugLog.log(DebugCategory.AGENT, "CRAFTER running", mapOf(
+                    "crafterId" to phase.crafterId.take(8),
+                    "taskId" to phase.taskId.take(8),
+                    "taskTitle" to title,
+                ))
+
                 updateCrafterState(phase.crafterId) {
                     CrafterStreamState(
                         agentId = phase.crafterId,
@@ -359,13 +470,43 @@ class RoutaViewModel(
             }
 
             is OrchestratorPhase.CrafterCompleted -> {
+                debugLog.log(DebugCategory.AGENT, "CRAFTER completed", mapOf(
+                    "crafterId" to phase.crafterId.take(8),
+                    "taskId" to phase.taskId.take(8),
+                ))
+
                 updateCrafterState(phase.crafterId) { current ->
                     current.copy(status = AgentStatus.COMPLETED)
                 }
             }
 
-            else -> {
-                // Other phases are observable via the phase StateFlow
+            is OrchestratorPhase.VerificationStarting -> {
+                debugLog.log(DebugCategory.PHASE, "GATE verification starting", mapOf(
+                    "wave" to phase.wave.toString(),
+                ))
+            }
+
+            is OrchestratorPhase.VerificationCompleted -> {
+                debugLog.log(DebugCategory.PHASE, "GATE verification completed", mapOf(
+                    "gateId" to phase.gateId.take(8),
+                    "outputPreview" to phase.output.take(300),
+                ))
+            }
+
+            is OrchestratorPhase.NeedsFix -> {
+                debugLog.log(DebugCategory.PHASE, "Wave needs fix, retrying", mapOf(
+                    "wave" to phase.wave.toString(),
+                ))
+            }
+
+            is OrchestratorPhase.Completed -> {
+                debugLog.log(DebugCategory.PHASE, "Orchestration completed successfully")
+            }
+
+            is OrchestratorPhase.MaxWavesReached -> {
+                debugLog.log(DebugCategory.PHASE, "Max waves reached", mapOf(
+                    "waves" to phase.waves.toString(),
+                ))
             }
         }
     }
@@ -377,6 +518,9 @@ class RoutaViewModel(
             when {
                 state?.routaAgentId == agentId -> {
                     agentRoleMap[agentId] = AgentRole.ROUTA
+                    debugLog.log(DebugCategory.AGENT, "Identified agent as ROUTA", mapOf(
+                        "agentId" to agentId.take(8),
+                    ))
                     AgentRole.ROUTA
                 }
                 else -> null
@@ -406,7 +550,9 @@ class RoutaViewModel(
             }
 
             null -> {
-                // Unknown agent — skip routing
+                debugLog.log(DebugCategory.STREAM, "Chunk for unknown agent, skipping", mapOf(
+                    "agentId" to agentId.take(8),
+                ))
             }
         }
     }
@@ -417,10 +563,20 @@ class RoutaViewModel(
                 val agent = routaSystem?.context?.agentStore?.get(event.agentId)
                 if (agent != null) {
                     agentRoleMap[agent.id] = agent.role
+                    debugLog.log(DebugCategory.AGENT, "Agent created", mapOf(
+                        "agentId" to agent.id.take(8),
+                        "role" to agent.role.name,
+                        "name" to agent.name,
+                    ))
                 }
             }
 
             is AgentEvent.AgentStatusChanged -> {
+                debugLog.log(DebugCategory.AGENT, "Agent status changed", mapOf(
+                    "agentId" to event.agentId.take(8),
+                    "newStatus" to event.newStatus.name,
+                ))
+
                 if (event.newStatus == AgentStatus.ERROR) {
                     val role = agentRoleMap[event.agentId]
                     if (role == AgentRole.CRAFTER) {
@@ -434,10 +590,23 @@ class RoutaViewModel(
             is AgentEvent.TaskDelegated -> {
                 agentRoleMap[event.agentId] = AgentRole.CRAFTER
                 crafterTaskMap[event.agentId] = event.taskId
+
+                debugLog.log(DebugCategory.TASK, "Task delegated to agent", mapOf(
+                    "agentId" to event.agentId.take(8),
+                    "taskId" to event.taskId.take(8),
+                ))
             }
 
             is AgentEvent.AgentCompleted -> {
                 val role = agentRoleMap[event.agentId]
+
+                debugLog.log(DebugCategory.AGENT, "Agent completed", mapOf(
+                    "agentId" to event.agentId.take(8),
+                    "role" to (role?.name ?: "unknown"),
+                    "taskId" to event.report.taskId.take(8),
+                    "success" to event.report.success.toString(),
+                ))
+
                 if (role == AgentRole.CRAFTER) {
                     val report = event.report
                     val completionChunk = StreamChunk.CompletionReport(

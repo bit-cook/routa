@@ -146,34 +146,24 @@ class IdeaRoutaService(private val project: Project) : Disposable {
 
     /**
      * Stop all running agents and cancel the current execution.
+     *
+     * Delegates to [RoutaViewModel.stopExecution] which:
+     * 1. Cancels the orchestration coroutine
+     * 2. Interrupts ALL known agents (ROUTA, CRAFTERs, GATE)
+     * 3. Updates crafter states to CANCELLED
      */
     fun stopExecution() {
         if (!isRunning.value) return
 
         log.info("Stopping execution...")
 
-        scope.launch {
-            try {
-                // Interrupt all active CRAFTER agents via the IDE-specific provider
-                val activeAgents = crafterStates.value.filter { it.value.status == com.phodal.routa.core.model.AgentStatus.ACTIVE }
-                for ((agentId, _) in activeAgents) {
-                    try {
-                        acpProvider?.interrupt(agentId)
-                        log.info("Interrupted agent $agentId")
-                    } catch (e: Exception) {
-                        log.warn("Failed to interrupt agent $agentId: ${e.message}")
-                    }
-                }
+        // Delegate to ViewModel which properly cancels the execution job
+        // and interrupts ALL known agents (not just active crafters)
+        viewModel.stopExecution()
 
-                // Reset via ViewModel
-                viewModel.reset()
-                // Reset IDE-specific state
-                _mcpServerUrl.value = null
-                disconnectMcpSession()
-            } catch (e: Exception) {
-                log.warn("Error during stop: ${e.message}", e)
-            }
-        }
+        // Clean up IDE-specific state
+        _mcpServerUrl.value = null
+        disconnectMcpSession()
     }
 
     /**
