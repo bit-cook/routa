@@ -150,6 +150,12 @@ class DispatcherPanel(
             routaSection.setPlanningText("✓ Ready. CRAFTER: $model | $routaInfo")
         }
 
+        // Wire up CRAFTER stop callback
+        crafterSection.onStopCrafter = { agentId ->
+            log.info("Stopping CRAFTER agent: $agentId")
+            routaService.stopCrafter(agentId)
+        }
+
         // Wire up ROUTA model change (LLM model selection for KoogAgent, or ACP agent selection)
         routaSection.onModelChanged = { modelName ->
             if (routaService.useAcpForRouta.value) {
@@ -220,6 +226,13 @@ class DispatcherPanel(
             preferredSize = Dimension(100, 32)
         }
 
+        val stopButton = JButton("Stop").apply {
+            icon = AllIcons.Actions.Suspend
+            toolTipText = "Stop all running agents"
+            preferredSize = Dimension(100, 32)
+            isVisible = false
+        }
+
         sendButton.addActionListener {
             val text = inputArea.text.trim()
             if (text.isNotEmpty()) {
@@ -228,15 +241,37 @@ class DispatcherPanel(
             }
         }
 
+        stopButton.addActionListener {
+            stopExecution()
+        }
+
+        // Observe isRunning to toggle send/stop buttons
+        scope.launch {
+            routaService.isRunning.collectLatest { isRunning ->
+                withContext(Dispatchers.EDT) {
+                    sendButton.isVisible = !isRunning
+                    stopButton.isVisible = isRunning
+                    inputArea.isEnabled = !isRunning
+                }
+            }
+        }
+
         val inputScroll = JScrollPane(inputArea).apply {
             border = JBUI.Borders.empty()
             preferredSize = Dimension(0, 48)
         }
 
+        // Button panel to hold both send and stop buttons
+        val buttonPanel = JPanel(CardLayout()).apply {
+            isOpaque = false
+            add(sendButton, "send")
+            add(stopButton, "stop")
+        }
+
         val topRow = JPanel(BorderLayout()).apply {
             isOpaque = false
             add(inputScroll, BorderLayout.CENTER)
-            add(sendButton, BorderLayout.EAST)
+            add(buttonPanel, BorderLayout.EAST)
         }
 
         // Create bottom panel with hint label and MCP status
@@ -557,6 +592,14 @@ class DispatcherPanel(
                 routaSection.setPlanningText("Execution failed: ${e.message}")
             }
         }
+    }
+
+    private fun stopExecution() {
+        log.info("Stopping execution...")
+        routaService.stopExecution()
+        routaSection.appendChunk(
+            com.phodal.routa.core.provider.StreamChunk.Text("\n\n⏹ Execution stopped by user.")
+        )
     }
 
     private fun handleResult(result: OrchestratorResult) {

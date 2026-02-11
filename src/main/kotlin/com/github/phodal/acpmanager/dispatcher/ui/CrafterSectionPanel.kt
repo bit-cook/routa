@@ -58,6 +58,9 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
     /** Callback when the model is changed. */
     var onModelChanged: (String) -> Unit = {}
 
+    /** Callback when a CRAFTER agent should be stopped. */
+    var onStopCrafter: (String) -> Unit = {}
+
     /** Maps agentId → CrafterDetailPanel for updating. */
     private val detailPanels = mutableMapOf<String, CrafterDetailPanel>()
 
@@ -191,8 +194,10 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
                         tabbedPane.setIconAt(tabIdx, getStatusIcon(state.status))
                     }
                 } else {
-                    // Create new tab
-                    val panel = CrafterDetailPanel()
+                    // Create new tab with stop callback
+                    val panel = CrafterDetailPanel(
+                        onStopClick = { onStopCrafter(agentId) }
+                    )
                     panel.update(state)
                     detailPanels[agentId] = panel
                     tabbedPane.addTab(
@@ -278,11 +283,13 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
  * with the same high-quality rendering used in the main chat panel.
  *
  * Shows:
- * - Task info header: title, agent ID, status, progress bar
+ * - Task info header: title, agent ID, status, stop button, progress bar
  * - Task details (collapsible)
  * - Rendered streaming output via [AcpEventRenderer]
  */
-class CrafterDetailPanel : JPanel(BorderLayout()) {
+class CrafterDetailPanel(
+    private val onStopClick: () -> Unit = {}
+) : JPanel(BorderLayout()) {
 
     private val taskTitleLabel = JBLabel("").apply {
         foreground = JBColor(0xC9D1D9, 0xC9D1D9)
@@ -297,6 +304,15 @@ class CrafterDetailPanel : JPanel(BorderLayout()) {
     private val statusLabel = JBLabel("PENDING").apply {
         foreground = JBColor(0x6B7280, 0x6B7280)
         font = font.deriveFont(Font.BOLD, 10f)
+    }
+
+    private val stopButton = JButton(AllIcons.Actions.Suspend).apply {
+        toolTipText = "Stop this CRAFTER agent"
+        preferredSize = Dimension(24, 24)
+        isContentAreaFilled = false
+        isBorderPainted = false
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        isVisible = false // Only visible when running
     }
 
     private val progressBar = JProgressBar(0, 100).apply {
@@ -363,7 +379,12 @@ class CrafterDetailPanel : JPanel(BorderLayout()) {
         background = JBColor(0x0D1117, 0x0D1117)
         border = JBUI.Borders.empty(4)
 
-        // Top: task info + status
+        // Wire up stop button
+        stopButton.addActionListener {
+            onStopClick()
+        }
+
+        // Top: task info + status + stop button
         val infoPanel = JPanel(BorderLayout()).apply {
             isOpaque = false
             border = JBUI.Borders.emptyBottom(4)
@@ -376,7 +397,14 @@ class CrafterDetailPanel : JPanel(BorderLayout()) {
                 add(taskIdLabel)
             }
             add(leftPanel, BorderLayout.WEST)
-            add(statusLabel, BorderLayout.EAST)
+
+            // Right side: status + stop button
+            val rightPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply {
+                isOpaque = false
+                add(statusLabel)
+                add(stopButton)
+            }
+            add(rightPanel, BorderLayout.EAST)
         }
 
         // Task details section (collapsible)
@@ -435,6 +463,9 @@ class CrafterDetailPanel : JPanel(BorderLayout()) {
         }
         statusLabel.text = statusText
         statusLabel.foreground = statusColor
+
+        // Show stop button only when agent is actively running
+        stopButton.isVisible = state.status == AgentStatus.ACTIVE
 
         progressBar.value = when (state.status) {
             AgentStatus.COMPLETED -> 100

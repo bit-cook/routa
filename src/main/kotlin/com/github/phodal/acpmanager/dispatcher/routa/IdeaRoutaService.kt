@@ -158,6 +158,57 @@ class IdeaRoutaService(private val project: Project) : Disposable {
     fun isInitialized(): Boolean = orchestrator != null
 
     /**
+     * Stop all running agents and cancel the current execution.
+     */
+    fun stopExecution() {
+        if (!_isRunning.value) return
+
+        log.info("Stopping execution...")
+
+        scope.launch {
+            try {
+                // Interrupt all active CRAFTER agents
+                val activeAgents = _crafterStates.value.filter { it.value.status == AgentStatus.ACTIVE }
+                for ((agentId, _) in activeAgents) {
+                    try {
+                        acpProvider?.interrupt(agentId)
+                        updateCrafterState(agentId) { current ->
+                            current.copy(status = AgentStatus.CANCELLED)
+                        }
+                        log.info("Interrupted agent $agentId")
+                    } catch (e: Exception) {
+                        log.warn("Failed to interrupt agent $agentId: ${e.message}")
+                    }
+                }
+
+                // Reset the orchestrator state
+                reset()
+            } catch (e: Exception) {
+                log.warn("Error during stop: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Stop a specific CRAFTER agent by its ID.
+     */
+    fun stopCrafter(agentId: String) {
+        log.info("Stopping CRAFTER agent $agentId...")
+
+        scope.launch {
+            try {
+                acpProvider?.interrupt(agentId)
+                updateCrafterState(agentId) { current ->
+                    current.copy(status = AgentStatus.CANCELLED)
+                }
+                log.info("Stopped CRAFTER agent $agentId")
+            } catch (e: Exception) {
+                log.warn("Failed to stop CRAFTER agent $agentId: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
      * Get the coordination state from the underlying RoutaCoordinator.
      */
     val coordinationState: StateFlow<CoordinationState>
