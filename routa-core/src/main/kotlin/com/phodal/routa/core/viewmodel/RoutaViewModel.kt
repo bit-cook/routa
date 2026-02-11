@@ -24,6 +24,11 @@ import kotlinx.coroutines.flow.*
  * - **IntelliJ Plugin** — `IdeaRoutaService` / `DispatcherPanel`
  * - **Tests** — unit & integration tests
  *
+ * ## Key Design Decision: TaskId-keyed State
+ * [crafterStates] is keyed by **taskId** (not agentId). This allows the UI to
+ * show all planned tasks as tabs immediately after ROUTA planning, even before
+ * agents are assigned. Agent IDs are stored inside each [CrafterStreamState].
+ *
  * ## Typical Usage
  * ```kotlin
  * val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -39,16 +44,6 @@ import kotlinx.coroutines.flow.*
  *
  * // Execute
  * val result = vm.execute("Add user authentication")
- * ```
- *
- * ## Architecture
- * ```
- * RoutaViewModel
- *   ├── RoutaSystem (stores, coordinator, event bus)
- *   ├── RoutaOrchestrator (ROUTA → CRAFTER → GATE flow)
- *   ├── AgentProvider (pluggable: ACP, Koog, Claude, mock)
- *   ├── Observable State (phase, chunks, crafter states, result)
- *   └── DebugLog (structured trace for troubleshooting)
  * ```
  *
  * @param scope The coroutine scope for background work. The caller owns the scope's lifecycle.
@@ -72,11 +67,22 @@ class RoutaViewModel(
     val gateChunks: SharedFlow<StreamChunk> = _gateChunks.asSharedFlow()
 
     private val _crafterChunks = MutableSharedFlow<Pair<String, StreamChunk>>(extraBufferCapacity = 512)
-    /** Streaming chunks from CRAFTER agents, keyed by agent ID. */
+    /**
+     * Streaming chunks from CRAFTER agents, keyed by **taskId**.
+     *
+     * The first element of the pair is the taskId (not agentId).
+     * This matches the key used in [crafterStates].
+     */
     val crafterChunks: SharedFlow<Pair<String, StreamChunk>> = _crafterChunks.asSharedFlow()
 
     private val _crafterStates = MutableStateFlow<Map<String, CrafterStreamState>>(emptyMap())
-    /** Per-CRAFTER streaming state for UI rendering. */
+    /**
+     * Per-task CRAFTER streaming state for UI rendering.
+     *
+     * **Keyed by taskId** — all planned tasks appear immediately after ROUTA planning,
+     * with PENDING status. Status updates to ACTIVE when an agent starts, COMPLETED when done.
+     * This allows the UI to show all task tabs from the start.
+     */
     val crafterStates: StateFlow<Map<String, CrafterStreamState>> = _crafterStates.asStateFlow()
 
     private val _events = MutableSharedFlow<AgentEvent>(extraBufferCapacity = 256)
@@ -109,11 +115,11 @@ class RoutaViewModel(
     /** Track agentId → role for routing stream chunks AND for stop-all. */
     private val agentRoleMap = mutableMapOf<String, AgentRole>()
 
-    /** Track crafterId → taskId mapping. */
+    /** Track agentId → taskId mapping (CRAFTER agents only). */
     private val crafterTaskMap = mutableMapOf<String, String>()
 
-    /** Track crafterId → task title (cached from handlePhaseChange). */
-    private val crafterTitleMap = mutableMapOf<String, String>()
+    /** Track taskId → task title. */
+    private val taskTitleMap = mutableMapOf<String, String>()
 
     /** Lock for thread-safe updates to _crafterStates. */
     private val crafterStateLock = Any()
@@ -227,7 +233,7 @@ class RoutaViewModel(
         _crafterStates.value = emptyMap()
         agentRoleMap.clear()
         crafterTaskMap.clear()
-        crafterTitleMap.clear()
+        taskTitleMap.clear()
 
         val request = if (useEnhancedRoutaPrompt) {
             buildRoutaEnhancedPrompt(userRequest)
@@ -309,11 +315,13 @@ class RoutaViewModel(
                 }
             }
 
-            // 3. Mark all active crafters as CANCELLED
-            val activeAgents = _crafterStates.value.filter { it.value.status == AgentStatus.ACTIVE }
-            for ((agentId, _) in activeAgents) {
-                updateCrafterState(agentId) { current ->
-                    current.copy(status = AgentStatus.CANCELLED)
+            // 3. Mark all non-completed tasks as CANCELLED
+            val currentStates = _crafterStates.value
+            for ((taskId, state) in currentStates) {
+                if (state.status == AgentStatus.ACTIVE || state.status == AgentStatus.PENDING) {
+                    updateCrafterState(taskId) { current ->
+                        current.copy(status = AgentStatus.CANCELLED)
+                    }
                 }
             }
 
@@ -322,17 +330,23 @@ class RoutaViewModel(
     }
 
     /**
-     * Stop a specific CRAFTER agent by its ID.
+     * Stop a specific CRAFTER agent by its agent ID.
      *
-     * @param agentId The agent ID to interrupt.
+     * @param agentId The agent ID to interrupt (looked up from [CrafterStreamState.agentId]).
      */
     fun stopCrafter(agentId: String) {
-        debugLog.log(DebugCategory.STOP, "Stopping single crafter", mapOf("agentId" to agentId.take(8)))
+        val taskId = crafterTaskMap[agentId]
+        debugLog.log(DebugCategory.STOP, "Stopping single crafter", mapOf(
+            "agentId" to agentId.take(8),
+            "taskId" to (taskId?.take(8) ?: "unknown"),
+        ))
         scope.launch {
             try {
                 provider?.interrupt(agentId)
-                updateCrafterState(agentId) { current ->
-                    current.copy(status = AgentStatus.CANCELLED)
+                if (taskId != null) {
+                    updateCrafterState(taskId) { current ->
+                        current.copy(status = AgentStatus.CANCELLED)
+                    }
                 }
             } catch (_: Exception) {
                 // Best effort
@@ -380,7 +394,7 @@ class RoutaViewModel(
         _result.value = null
         agentRoleMap.clear()
         crafterTaskMap.clear()
-        crafterTitleMap.clear()
+        taskTitleMap.clear()
     }
 
     // ── Event Handlers ──────────────────────────────────────────────────
@@ -388,7 +402,6 @@ class RoutaViewModel(
     private suspend fun handlePhaseChange(phase: OrchestratorPhase) {
         _phase.value = phase
 
-        // Debug log every phase transition with details
         when (phase) {
             is OrchestratorPhase.Initializing -> {
                 debugLog.log(DebugCategory.PHASE, "Phase: Initializing")
@@ -403,27 +416,36 @@ class RoutaViewModel(
                     "outputLength" to phase.planOutput.length.toString(),
                     "preview" to phase.planOutput.take(500),
                 ))
-
-                // Log parsed tasks from the plan
-                val taskStore = routaSystem?.context?.taskStore
-                val workspaceId = routaSystem?.coordinator?.coordinationState?.value?.workspaceId ?: ""
-                val tasks = taskStore?.listByWorkspace(workspaceId)
-                if (!tasks.isNullOrEmpty()) {
-                    for ((index, task) in tasks.withIndex()) {
-                        debugLog.log(DebugCategory.TASK, "Parsed task #${index + 1}", mapOf(
-                            "taskId" to task.id.take(8),
-                            "title" to task.title,
-                            "status" to task.status.name,
-                            "objective" to task.objective.take(200),
-                        ))
-                    }
-                }
             }
 
             is OrchestratorPhase.TasksRegistered -> {
                 debugLog.log(DebugCategory.TASK, "Tasks registered", mapOf(
                     "count" to phase.count.toString(),
                 ))
+
+                // ── Pre-populate all tasks as PENDING tabs ──
+                // This is the key: by populating crafterStates here, the UI can
+                // show all planned tasks immediately, not just the currently running one.
+                val workspaceId = routaSystem?.coordinator?.coordinationState?.value?.workspaceId ?: ""
+                val allTasks = routaSystem?.context?.taskStore?.listByWorkspace(workspaceId) ?: emptyList()
+
+                val states = mutableMapOf<String, CrafterStreamState>()
+                for ((index, task) in allTasks.withIndex()) {
+                    states[task.id] = CrafterStreamState(
+                        agentId = "",  // no agent assigned yet
+                        taskId = task.id,
+                        taskTitle = task.title,
+                        status = AgentStatus.PENDING,
+                    )
+                    taskTitleMap[task.id] = task.title
+
+                    debugLog.log(DebugCategory.TASK, "Task #${index + 1} planned", mapOf(
+                        "taskId" to task.id.take(8),
+                        "title" to task.title,
+                        "objective" to task.objective.take(200),
+                    ))
+                }
+                _crafterStates.value = states
             }
 
             is OrchestratorPhase.WaveStarting -> {
@@ -433,36 +455,29 @@ class RoutaViewModel(
             }
 
             is OrchestratorPhase.CrafterRunning -> {
+                val taskId = phase.taskId
                 agentRoleMap[phase.crafterId] = AgentRole.CRAFTER
-                crafterTaskMap[phase.crafterId] = phase.taskId
+                crafterTaskMap[phase.crafterId] = taskId
 
-                // Get task title from the store with fallback logic
-                val task = routaSystem?.context?.taskStore?.get(phase.taskId)
-                val title = when {
-                    task?.title?.isNotBlank() == true -> task.title
-                    else -> {
-                        val allTasks = routaSystem?.context?.taskStore?.listByWorkspace(
-                            routaSystem?.coordinator?.coordinationState?.value?.workspaceId ?: ""
-                        )
-                        val matchingTask = allTasks?.find { it.id == phase.taskId }
-                        matchingTask?.title?.takeIf { it.isNotBlank() }
-                            ?: "Task ${phase.taskId.take(8)}..."
-                    }
+                // Resolve task title (should already be in taskTitleMap from TasksRegistered)
+                val title = taskTitleMap[taskId] ?: run {
+                    val task = routaSystem?.context?.taskStore?.get(taskId)
+                    val resolved = task?.title?.takeIf { it.isNotBlank() }
+                        ?: "Task ${taskId.take(8)}..."
+                    taskTitleMap[taskId] = resolved
+                    resolved
                 }
-
-                // Cache the title for updateCrafterState fallback
-                crafterTitleMap[phase.crafterId] = title
 
                 debugLog.log(DebugCategory.AGENT, "CRAFTER running", mapOf(
                     "crafterId" to phase.crafterId.take(8),
-                    "taskId" to phase.taskId.take(8),
+                    "taskId" to taskId.take(8),
                     "taskTitle" to title,
                 ))
 
-                updateCrafterState(phase.crafterId) {
-                    CrafterStreamState(
+                // Update the PENDING entry to ACTIVE with the assigned agentId
+                updateCrafterState(taskId) { current ->
+                    current.copy(
                         agentId = phase.crafterId,
-                        taskId = phase.taskId,
                         taskTitle = title,
                         status = AgentStatus.ACTIVE,
                     )
@@ -470,12 +485,14 @@ class RoutaViewModel(
             }
 
             is OrchestratorPhase.CrafterCompleted -> {
+                val taskId = phase.taskId
+
                 debugLog.log(DebugCategory.AGENT, "CRAFTER completed", mapOf(
                     "crafterId" to phase.crafterId.take(8),
-                    "taskId" to phase.taskId.take(8),
+                    "taskId" to taskId.take(8),
                 ))
 
-                updateCrafterState(phase.crafterId) { current ->
+                updateCrafterState(taskId) { current ->
                     current.copy(status = AgentStatus.COMPLETED)
                 }
             }
@@ -531,11 +548,20 @@ class RoutaViewModel(
             AgentRole.ROUTA -> _routaChunks.tryEmit(chunk)
             AgentRole.GATE -> _gateChunks.tryEmit(chunk)
             AgentRole.CRAFTER -> {
-                // Emit chunk for real-time UI updates
-                _crafterChunks.tryEmit(agentId to chunk)
+                // Look up taskId for this agent
+                val taskId = crafterTaskMap[agentId]
+                if (taskId == null) {
+                    debugLog.log(DebugCategory.STREAM, "CRAFTER chunk but no taskId mapping", mapOf(
+                        "agentId" to agentId.take(8),
+                    ))
+                    return
+                }
+
+                // Emit chunk keyed by taskId for UI
+                _crafterChunks.tryEmit(taskId to chunk)
 
                 // Also update accumulated state
-                updateCrafterState(agentId) { current ->
+                updateCrafterState(taskId) { current ->
                     val newOutput = when (chunk) {
                         is StreamChunk.Text -> current.outputText + chunk.content
                         is StreamChunk.ToolCall -> current.outputText + "\n[${chunk.status}] ${chunk.name}"
@@ -580,8 +606,11 @@ class RoutaViewModel(
                 if (event.newStatus == AgentStatus.ERROR) {
                     val role = agentRoleMap[event.agentId]
                     if (role == AgentRole.CRAFTER) {
-                        updateCrafterState(event.agentId) { current ->
-                            current.copy(status = AgentStatus.ERROR)
+                        val taskId = crafterTaskMap[event.agentId]
+                        if (taskId != null) {
+                            updateCrafterState(taskId) { current ->
+                                current.copy(status = AgentStatus.ERROR)
+                            }
                         }
                     }
                 }
@@ -609,14 +638,15 @@ class RoutaViewModel(
 
                 if (role == AgentRole.CRAFTER) {
                     val report = event.report
+                    val taskId = crafterTaskMap[event.agentId] ?: report.taskId
                     val completionChunk = StreamChunk.CompletionReport(
                         agentId = event.agentId,
-                        taskId = report.taskId,
+                        taskId = taskId,
                         summary = report.summary,
                         filesModified = report.filesModified,
                         success = report.success,
                     )
-                    _crafterChunks.tryEmit(event.agentId to completionChunk)
+                    _crafterChunks.tryEmit(taskId to completionChunk)
                 }
             }
 
@@ -626,15 +656,19 @@ class RoutaViewModel(
         }
     }
 
-    private fun updateCrafterState(agentId: String, updater: (CrafterStreamState) -> CrafterStreamState) {
+    /**
+     * Update a crafter state entry by **taskId**.
+     * If no entry exists yet, creates a default PENDING one.
+     */
+    private fun updateCrafterState(taskId: String, updater: (CrafterStreamState) -> CrafterStreamState) {
         synchronized(crafterStateLock) {
             val current = _crafterStates.value.toMutableMap()
-            val existing = current[agentId] ?: CrafterStreamState(
-                agentId = agentId,
-                taskId = crafterTaskMap[agentId] ?: "",
-                taskTitle = crafterTitleMap[agentId] ?: "",
+            val existing = current[taskId] ?: CrafterStreamState(
+                agentId = "",
+                taskId = taskId,
+                taskTitle = taskTitleMap[taskId] ?: "",
             )
-            current[agentId] = updater(existing)
+            current[taskId] = updater(existing)
             _crafterStates.value = current
         }
     }

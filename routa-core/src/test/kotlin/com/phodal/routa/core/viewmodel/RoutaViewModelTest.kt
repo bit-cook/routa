@@ -262,17 +262,43 @@ class RoutaViewModelTest {
     }
 
     @Test
-    fun `crafter states track active and completed agents`() {
-        val (vm, _) = createViewModel()
+    fun `crafter states are keyed by taskId and pre-populated`() {
+        val (vm, scope) = createViewModel()
+        var statesAfterPlan: Map<String, CrafterStreamState>? = null
+
+        // Capture crafter states as they update
+        val allSnapshots = mutableListOf<Map<String, CrafterStreamState>>()
+        val collectJob = scope.launch {
+            vm.crafterStates.collect { states ->
+                if (states.isNotEmpty()) {
+                    allSnapshots.add(states.toMap())
+                }
+            }
+        }
+
         vm.initialize(MockAgentProvider(), "test-workspace")
-
         runBlocking { vm.execute("Add features") }
+        runBlocking { delay(100) }
+        collectJob.cancel()
 
-        // After completion, crafters should be tracked
-        val states = vm.crafterStates.value
-        assertTrue("Should have crafter states", states.isNotEmpty())
+        // The first non-empty snapshot should show all tasks as PENDING
+        val firstSnapshot = allSnapshots.firstOrNull()
+        assertNotNull("Should have at least one non-empty snapshot", firstSnapshot)
+        assertEquals("First snapshot should have 2 tasks", 2, firstSnapshot!!.size)
+
+        // Verify all entries are keyed by taskId (UUID format, not agent IDs)
+        for ((taskId, state) in firstSnapshot) {
+            assertEquals("Map key should match state.taskId", taskId, state.taskId)
+            assertTrue("Task title should not be empty", state.taskTitle.isNotBlank())
+        }
+
+        // Final state: all crafters should be completed with agentIds assigned
+        val finalStates = vm.crafterStates.value
+        assertTrue("Should have crafter states", finalStates.isNotEmpty())
         assertTrue("All crafters should be completed",
-            states.values.all { it.status == AgentStatus.COMPLETED })
+            finalStates.values.all { it.status == AgentStatus.COMPLETED })
+        assertTrue("All crafters should have agentIds",
+            finalStates.values.all { it.agentId.isNotBlank() })
 
         vm.dispose()
     }
@@ -300,6 +326,39 @@ class RoutaViewModelTest {
         runBlocking { vm.execute("Add features") }
 
         assertFalse("Should not be running after completion", vm.isRunning.value)
+
+        vm.dispose()
+    }
+
+    // ── Debug Log Tests ─────────────────────────────────────────────────
+
+    @Test
+    fun `debug log records task parsing and phase transitions`() {
+        val (vm, _) = createViewModel()
+        vm.initialize(MockAgentProvider(), "test-workspace")
+
+        runBlocking { vm.execute("Add features") }
+
+        val entries = vm.debugLog.entries
+        assertTrue("Should have debug entries", entries.isNotEmpty())
+
+        // Verify key categories are present
+        assertTrue("Should have PHASE entries",
+            entries.any { it.category == DebugCategory.PHASE })
+        assertTrue("Should have TASK entries",
+            entries.any { it.category == DebugCategory.TASK })
+        assertTrue("Should have AGENT entries",
+            entries.any { it.category == DebugCategory.AGENT })
+        assertTrue("Should have PLAN entries",
+            entries.any { it.category == DebugCategory.PLAN })
+
+        // Verify task parsing is logged
+        val taskEntries = entries.filter { it.category == DebugCategory.TASK && it.message.contains("planned") }
+        assertEquals("Should log 2 planned tasks", 2, taskEntries.size)
+
+        // Verify execution order is traceable
+        val agentEntries = entries.filter { it.message.contains("CRAFTER running") }
+        assertEquals("Should log 2 CRAFTER starts", 2, agentEntries.size)
 
         vm.dispose()
     }

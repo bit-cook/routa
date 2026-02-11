@@ -84,10 +84,34 @@ object TaskParser {
      * into separate sub-blocks — one per task.
      *
      * If the block contains only one `# ` header (or none), it is returned as-is.
+     *
+     * **Important:** Lines inside markdown code fences (``` ... ```) are ignored
+     * when scanning for `# ` title headers. This prevents bash comments like
+     * `# Check if file exists` inside verification code blocks from being
+     * mistaken for task titles.
      */
     internal fun splitMultiTaskBlock(block: String): List<String> {
         val lines = block.lines()
-        val titleIndices = lines.indices.filter { lines[it].startsWith("# ") && !lines[it].startsWith("## ") }
+
+        // Build a set of line indices that are inside code fences
+        val insideCodeFence = BooleanArray(lines.size)
+        var inFence = false
+        for (i in lines.indices) {
+            val trimmed = lines[i].trim()
+            if (trimmed.startsWith("```")) {
+                inFence = !inFence
+                insideCodeFence[i] = true // The fence line itself is "inside"
+            } else {
+                insideCodeFence[i] = inFence
+            }
+        }
+
+        // Find `# ` title lines that are NOT inside code fences
+        val titleIndices = lines.indices.filter { i ->
+            !insideCodeFence[i] &&
+                lines[i].startsWith("# ") &&
+                !lines[i].startsWith("## ")
+        }
 
         // 0 or 1 title → single task block
         if (titleIndices.size <= 1) return listOf(block)
@@ -108,9 +132,8 @@ object TaskParser {
     internal fun parseTaskBlock(block: String, workspaceId: String): Task {
         val lines = block.lines()
 
-        val title = lines.firstOrNull { it.startsWith("# ") && !it.startsWith("## ") }
-            ?.removePrefix("# ")?.trim()
-            ?: "Untitled Task"
+        // Find the title — must be outside code fences
+        val title = findTitleOutsideCodeFences(lines)
 
         val objective = extractSectionWithAliases(lines, "Objective")
         val scope = extractListSectionWithAliases(lines, "Scope")
@@ -130,6 +153,24 @@ object TaskParser {
             createdAt = now,
             updatedAt = now,
         )
+    }
+
+    /**
+     * Find the first `# ` title line that is not inside a code fence.
+     */
+    private fun findTitleOutsideCodeFences(lines: List<String>): String {
+        var inFence = false
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.startsWith("```")) {
+                inFence = !inFence
+                continue
+            }
+            if (!inFence && line.startsWith("# ") && !line.startsWith("## ")) {
+                return line.removePrefix("# ").trim()
+            }
+        }
+        return "Untitled Task"
     }
 
     /**

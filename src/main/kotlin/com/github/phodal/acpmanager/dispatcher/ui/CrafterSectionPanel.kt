@@ -232,7 +232,12 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
 
     /**
      * Update all CRAFTER states at once.
-     * Creates new tabs as needed, updates existing tabs.
+     *
+     * The map is keyed by **taskId** (not agentId). All planned tasks appear
+     * immediately after ROUTA planning (with PENDING status), so tabs are
+     * created for every task upfront. As agents start running, tabs update
+     * to ACTIVE/COMPLETED with streaming output.
+     *
      * Auto-selects the first newly active tab.
      */
     fun updateCrafterStates(states: Map<String, CrafterStreamState>) {
@@ -243,42 +248,48 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
 
             var newActiveTab: String? = null
 
-            for ((agentId, state) in states) {
-                if (agentId !in agentOrder) {
-                    // ── New CRAFTER: create tab + detail panel ──
-                    agentOrder.add(agentId)
+            for ((taskId, state) in states) {
+                if (taskId !in agentOrder) {
+                    // ── New task: create tab + detail panel ──
+                    agentOrder.add(taskId)
 
                     val panel = CrafterDetailPanel(
-                        onStopClick = { onStopCrafter(agentId) }
+                        onStopClick = {
+                            // Look up the current agentId from the panel's state
+                            val agentId = detailPanels[taskId]?.currentAgentId.orEmpty()
+                            if (agentId.isNotBlank()) {
+                                onStopCrafter(agentId)
+                            }
+                        }
                     )
                     panel.update(state)
-                    detailPanels[agentId] = panel
+                    detailPanels[taskId] = panel
 
                     val tab = CrafterTabButton(
-                        agentId = agentId,
+                        agentId = taskId,
                         title = state.taskTitle.ifBlank { "Task ${agentOrder.size}" },
-                        onClick = { selectTab(agentId) }
+                        onClick = { selectTab(taskId) }
                     )
-                    tabButtons[agentId] = tab
+                    tabButtons[taskId] = tab
                     tabBarPanel.add(tab)
 
-                    contentPanel.add(panel, agentId)
+                    contentPanel.add(panel, taskId)
 
-                    // Auto-select the first newly active crafter
+                    // Auto-select the first newly active tab
                     if (state.status == AgentStatus.ACTIVE && newActiveTab == null) {
-                        newActiveTab = agentId
+                        newActiveTab = taskId
                     }
                 } else {
-                    // ── Existing CRAFTER: update state ──
-                    detailPanels[agentId]?.update(state)
-                    tabButtons[agentId]?.updateState(state.status, state.taskTitle)
+                    // ── Existing task: update state ──
+                    detailPanels[taskId]?.update(state)
+                    tabButtons[taskId]?.updateState(state.status, state.taskTitle)
 
                     // Auto-select if this is newly active and nothing else is selected as active
                     if (state.status == AgentStatus.ACTIVE && newActiveTab == null) {
                         val currentSelected = selectedAgentId
                         val currentState = currentSelected?.let { states[it] }
                         if (currentState == null || currentState.status != AgentStatus.ACTIVE) {
-                            newActiveTab = agentId
+                            newActiveTab = taskId
                         }
                     }
                 }
@@ -298,10 +309,12 @@ class CrafterSectionPanel : JPanel(BorderLayout()) {
 
     /**
      * Append a streaming chunk to a specific CRAFTER's panel.
+     *
+     * @param taskId The task ID (matching the [crafterStates] map key).
      */
-    fun appendChunk(agentId: String, chunk: StreamChunk) {
+    fun appendChunk(taskId: String, chunk: StreamChunk) {
         SwingUtilities.invokeLater {
-            detailPanels[agentId]?.appendChunk(chunk)
+            detailPanels[taskId]?.appendChunk(chunk)
         }
     }
 
@@ -505,6 +518,10 @@ class CrafterDetailPanel(
     private val onStopClick: () -> Unit = {}
 ) : JPanel(BorderLayout()) {
 
+    /** The current agent ID for this crafter (set by [update]). Used by the stop button. */
+    var currentAgentId: String = ""
+        private set
+
     private val taskTitleLabel = JBLabel("").apply {
         foreground = JBColor(0xC9D1D9, 0xC9D1D9)
         font = font.deriveFont(Font.BOLD, 12f)
@@ -665,8 +682,11 @@ class CrafterDetailPanel(
      * Update the full state of this CRAFTER.
      */
     fun update(state: CrafterStreamState) {
+        currentAgentId = state.agentId
+
         taskTitleLabel.text = state.taskTitle.ifBlank { "Task ${state.taskId.take(8)}" }
-        taskIdLabel.text = "Agent: ${state.agentId.take(8)}  |  Task: ${state.taskId.take(8)}"
+        val agentInfo = if (state.agentId.isNotBlank()) "Agent: ${state.agentId.take(8)}  |  " else ""
+        taskIdLabel.text = "${agentInfo}Task: ${state.taskId.take(8)}"
 
         val (statusText, statusColor) = when (state.status) {
             AgentStatus.PENDING -> "PENDING" to JBColor(0x6B7280, 0x6B7280)

@@ -629,6 +629,114 @@ Do B
         assertEquals("Task B", tasks[1].title)
     }
 
+    // ── Code fence handling (bash comments should NOT be task titles) ─────
+
+    @Test
+    fun `parse ignores bash comments inside code fences in verification`() {
+        val text = """
+@@@task
+# Create QUICKSTART.md
+
+## Objective
+Create a streamlined QUICKSTART.md guide
+
+## Scope
+- QUICKSTART.md in project root
+
+## Definition of Done
+- QUICKSTART.md exists
+- Contains working examples
+
+## Verification
+```bash
+# File exists and is valid markdown
+ls -la QUICKSTART.md
+head -50 QUICKSTART.md
+
+# Check links work (if any relative links)
+grep -E "\]\(" QUICKSTART.md | head -10
+```
+@@@
+
+@@@task
+# Create TypeScript Example
+
+## Objective
+Create a comprehensive TypeScript example
+
+## Scope
+- examples/typescript/ directory
+
+## Definition of Done
+- Contains runnable TypeScript code
+
+## Verification
+```bash
+# Check directory structure
+ls -la examples/typescript/
+
+# Install and run (if dependencies allow)
+cd examples/typescript && npm install && npm run build
+```
+@@@
+        """.trimIndent()
+
+        val tasks = TaskParser.parse(text, workspace)
+
+        // Should be exactly 2 tasks, not 6
+        assertEquals("Bash comments in code fences should NOT create extra tasks", 2, tasks.size)
+        assertEquals("Create QUICKSTART.md", tasks[0].title)
+        assertEquals("Create TypeScript Example", tasks[1].title)
+    }
+
+    @Test
+    fun `splitMultiTaskBlock ignores hash lines inside code fences`() {
+        val block = """
+# Real Task Title
+
+## Objective
+Do something
+
+## Verification
+```bash
+# This is a bash comment, NOT a task title
+ls -la
+# Another bash comment
+echo "hello"
+```
+        """.trimIndent()
+
+        val result = TaskParser.splitMultiTaskBlock(block)
+        assertEquals("Should be 1 task, bash comments ignored", 1, result.size)
+        assertTrue(result[0].startsWith("# Real Task Title"))
+    }
+
+    @Test
+    fun `splitMultiTaskBlock handles multiple tasks with code fences`() {
+        val block = """
+# Task A
+
+## Verification
+```
+# Not a task
+echo test
+```
+
+# Task B
+
+## Verification
+```bash
+# Also not a task
+ls -la
+```
+        """.trimIndent()
+
+        val result = TaskParser.splitMultiTaskBlock(block)
+        assertEquals("Should split into 2 tasks", 2, result.size)
+        assertTrue(result[0].startsWith("# Task A"))
+        assertTrue(result[1].startsWith("# Task B"))
+    }
+
     // ── splitMultiTaskBlock unit tests ───────────────────────────────────
 
     @Test
