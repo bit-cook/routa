@@ -145,7 +145,16 @@ class ToolCallPanel(
     private fun updateParamHint(params: String) {
         val hint = extractKeyParam(params)
         if (hint != null) {
-            val display = if (hint.length > 60) hint.takeLast(57) + "..." else hint
+            // For path-like values, show the end (filename); for others, show the beginning
+            val display = if (hint.length > 80) {
+                if (hint.contains("/") || hint.contains("\\")) {
+                    "..." + hint.takeLast(77)
+                } else {
+                    hint.take(77) + "..."
+                }
+            } else {
+                hint
+            }
             paramHintLabel.text = "  $display"
             paramHintLabel.isVisible = true
         }
@@ -174,11 +183,15 @@ class ToolCallPanel(
             "url", "uri",                                               // network
             "content", "text", "message",                               // content
             "description",                                              // meta
+            "search_term", "searchTerm",                                // web search
+            "glob_pattern", "globPattern",                              // glob
+            "target_directory", "targetDirectory",                      // directory operations
         )
 
         /**
          * Best-effort extraction of a key parameter from a JSON-like parameter string.
          * Works with both `{"key": "value"}` JSON and `key: value` plain formats.
+         * If no key parameter is found, returns the first string value or a compact JSON representation.
          */
         fun extractKeyParam(params: String): String? {
             if (params.isBlank()) return null
@@ -194,7 +207,22 @@ class ToolCallPanel(
                 }
             }
 
-            // Fallback: if it's a short single-line string, use it directly
+            // Fallback 1: Try to extract any first string value from JSON
+            if (trimmed.startsWith("{")) {
+                val anyStringPattern = """"([^"]+)"\s*:\s*"([^"]+)"""".toRegex()
+                anyStringPattern.find(trimmed)?.let { match ->
+                    val key = match.groupValues[1]
+                    val value = match.groupValues[2]
+                    return "$key: $value"
+                }
+                
+                // Fallback 2: Show compact JSON (remove whitespace and newlines)
+                val compact = trimmed.replace(Regex("\\s+"), " ")
+                if (compact.length <= 80) return compact
+                return compact.take(77) + "..."
+            }
+
+            // Fallback 3: if it's a short single-line string, use it directly
             if (!trimmed.startsWith("{") && !trimmed.startsWith("[") && trimmed.length < 80) {
                 val firstLine = trimmed.lineSequence().firstOrNull()?.trim()
                 if (firstLine != null && firstLine.length < 80) return firstLine
