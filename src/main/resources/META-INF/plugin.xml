@@ -34,6 +34,7 @@
         <projectService serviceImplementation="com.github.phodal.acpmanager.config.AcpConfigService"/>
         <projectService serviceImplementation="com.github.phodal.acpmanager.acp.AcpSessionManager"/>
         <projectService serviceImplementation="com.github.phodal.acpmanager.ide.IdeAcpClient"/>
+        <projectService serviceImplementation="com.github.phodal.acpmanager.dispatcher.routa.IdeaRoutaService"/>
 
         <consoleFilterProvider implementation="com.github.phodal.acpmanager.ide.TerminalIntegration"/>
     </extensions>

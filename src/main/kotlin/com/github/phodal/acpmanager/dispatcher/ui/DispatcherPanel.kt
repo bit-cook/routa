@@ -1,11 +1,7 @@
 package com.github.phodal.acpmanager.dispatcher.ui
 
 import com.github.phodal.acpmanager.config.AcpConfigService
-import com.github.phodal.acpmanager.dispatcher.AgentDispatcher
-import com.github.phodal.acpmanager.dispatcher.DefaultAgentDispatcher
-import com.github.phodal.acpmanager.dispatcher.idea.IdeaAgentExecutor
-import com.github.phodal.acpmanager.dispatcher.idea.IdeaPlanGenerator
-import com.github.phodal.acpmanager.dispatcher.model.*
+import com.github.phodal.acpmanager.dispatcher.routa.IdeaRoutaService
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.diagnostic.logger
@@ -15,6 +11,9 @@ import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
+import com.phodal.routa.core.coordinator.CoordinationPhase
+import com.phodal.routa.core.runner.OrchestratorPhase
+import com.phodal.routa.core.runner.OrchestratorResult
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import java.awt.*
@@ -27,11 +26,26 @@ private val log = logger<DispatcherPanel>()
 /**
  * Main panel for the Multi-Agent Dispatcher ToolWindow tab.
  *
- * Layout (top to bottom):
- * 1. [MasterAgentPanel] — Master Agent selector, thinking area, plan items
- * 2. [TaskListPanel]    — Task list with agent assignment, progress, execute button
- * 3. Input area         — User input field for describing tasks
- * 4. [LogStreamPanel]   — Real-time log stream with task-level filtering
+ * Redesigned with DAG + multi-agent architecture:
+ *
+ * ```
+ * ┌─────────────────────────────────┐
+ * │  ROUTA (Coordinator)            │  ← Plans tasks, streaming output
+ * │         ↓                       │
+ * ├─────────────────────────────────┤
+ * │  CRAFTERs (Implementors)       │  ← Tabbed, model config, main focus
+ * │  [Tab1] [Tab2] [Tab3]          │
+ * │  Task info + streaming output   │
+ * │         ↓                       │
+ * ├─────────────────────────────────┤
+ * │  GATE (Verifier)               │  ← Verdict, streaming verification
+ * ├─────────────────────────────────┤
+ * │  [Input area]            [Send] │  ← User request input
+ * └─────────────────────────────────┘
+ * ```
+ *
+ * The flow follows the Routa multi-agent DAG:
+ * ROUTA plans → CRAFTERs execute (parallel) → GATE verifies
  */
 class DispatcherPanel(
     private val project: Project,
@@ -39,81 +53,56 @@ class DispatcherPanel(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val configService = AcpConfigService.getInstance(project)
+    private val routaService = IdeaRoutaService.getInstance(project)
 
-    // UI components
-    private val masterAgentPanel = MasterAgentPanel()
-    private val taskListPanel = TaskListPanel()
-    private val logStreamPanel = LogStreamPanel()
+    // ── UI Sections ─────────────────────────────────────────────────────
 
-    // Dispatcher (initialized lazily when first needed)
-    private var dispatcher: AgentDispatcher? = null
+    private val routaSection = RoutaSectionPanel()
+    private val crafterSection = CrafterSectionPanel()
+    private val gateSection = GateSectionPanel()
 
     init {
         setupUI()
         loadAgents()
+        observeRoutaService()
     }
 
+    // ── UI Setup ────────────────────────────────────────────────────────
+
     private fun setupUI() {
-        // Main content with vertical split
         val mainPanel = JPanel(BorderLayout()).apply {
             isOpaque = true
             background = JBColor(0x0D1117, 0x0D1117)
         }
 
-        // Top section: Master Agent + Tasks (scrollable)
-        val topSection = JPanel().apply {
+        // DAG sections stacked vertically
+        val dagPanel = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             isOpaque = false
-
-            add(masterAgentPanel)
-            add(taskListPanel)
         }
 
-        // Input area (compact)
+        dagPanel.add(routaSection)
+        dagPanel.add(crafterSection)
+        dagPanel.add(gateSection)
+
+        // Input area at the bottom
         val inputPanel = createInputPanel()
 
-        // Split pane: top (master + tasks) / bottom (logs)
-        // Give more space to top (tasks area), less to logs
-        val splitPane = JSplitPane(JSplitPane.VERTICAL_SPLIT).apply {
-            topComponent = JScrollPane(topSection).apply {
-                border = JBUI.Borders.empty()
-            }
-            bottomComponent = logStreamPanel
-            dividerLocation = 500
-            resizeWeight = 0.8
+        // Scrollable DAG area
+        val scrollPane = JScrollPane(dagPanel).apply {
             border = JBUI.Borders.empty()
+            verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
+            horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
         }
 
-        mainPanel.add(splitPane, BorderLayout.CENTER)
+        mainPanel.add(scrollPane, BorderLayout.CENTER)
         mainPanel.add(inputPanel, BorderLayout.SOUTH)
 
         setContent(mainPanel)
 
-        // Wire up callbacks
-        masterAgentPanel.onMasterAgentChanged = { agentKey ->
-            dispatcher?.setMasterAgent(agentKey)
-        }
-
-        taskListPanel.onExecute = {
-            executePlan()
-        }
-
-        taskListPanel.onTaskAgentChanged = { taskId, newAgent ->
-            dispatcher?.updateTaskAgent(taskId, newAgent)
-        }
-
-        taskListPanel.onParallelismChanged = { value ->
-            dispatcher?.updateMaxParallelism(value)
-        }
-
-        taskListPanel.onTaskStop = { taskId ->
-            scope.launch {
-                dispatcher?.let { d ->
-                    if (d is DefaultAgentDispatcher) {
-                        d.cancelTask(taskId)
-                    }
-                }
-            }
+        // Wire up CRAFTER model change
+        crafterSection.onModelChanged = { model ->
+            routaService.crafterModelKey.value = model
         }
     }
 
@@ -123,58 +112,78 @@ class DispatcherPanel(
             background = JBColor(0x161B22, 0x161B22)
             border = JBUI.Borders.compound(
                 JBUI.Borders.customLineTop(JBColor(0x21262D, 0x21262D)),
-                JBUI.Borders.empty(4, 12)
+                JBUI.Borders.empty(6, 12)
             )
         }
 
-        val inputArea = JBTextArea(1, 40).apply {
+        val inputArea = JBTextArea(2, 40).apply {
             lineWrap = true
             wrapStyleWord = true
             background = JBColor(0x0D1117, 0x0D1117)
             foreground = JBColor(0xC9D1D9, 0xC9D1D9)
             border = JBUI.Borders.compound(
                 BorderFactory.createLineBorder(JBColor(0x30363D, 0x30363D)),
-                JBUI.Borders.empty(4, 6)
+                JBUI.Borders.empty(6, 8)
             )
             font = Font("SansSerif", Font.PLAIN, 12)
         }
+
+        // Placeholder text
+        inputArea.text = ""
+        inputArea.toolTipText = "Describe your task... (Enter to send, Shift+Enter for newline)"
 
         inputArea.addKeyListener(object : KeyAdapter() {
             override fun keyPressed(e: KeyEvent) {
                 if (e.keyCode == KeyEvent.VK_ENTER && !e.isShiftDown) {
                     e.consume()
-                    val inputText = inputArea.text.trim()
-                    if (inputText.isNotEmpty()) {
-                        startPlanning(inputText)
+                    val text = inputArea.text.trim()
+                    if (text.isNotEmpty()) {
+                        startExecution(text)
                         inputArea.text = ""
                     }
                 }
             }
         })
 
-        val sendButton = JButton(AllIcons.Actions.Execute).apply {
-            toolTipText = "Generate plan and start execution"
-            preferredSize = Dimension(28, 28)
-            isBorderPainted = false
-            isContentAreaFilled = false
+        val sendButton = JButton("Execute").apply {
+            icon = AllIcons.Actions.Execute
+            toolTipText = "Execute through Routa → CRAFTERs → GATE pipeline"
+            preferredSize = Dimension(100, 32)
         }
 
         sendButton.addActionListener {
             val text = inputArea.text.trim()
             if (text.isNotEmpty()) {
-                startPlanning(text)
+                startExecution(text)
                 inputArea.text = ""
             }
         }
 
-        panel.add(JScrollPane(inputArea).apply {
+        val inputScroll = JScrollPane(inputArea).apply {
             border = JBUI.Borders.empty()
-            preferredSize = Dimension(0, 32)
-        }, BorderLayout.CENTER)
-        panel.add(sendButton, BorderLayout.EAST)
+            preferredSize = Dimension(0, 48)
+        }
+
+        // Status hint
+        val hintLabel = JBLabel("Routa DAG: Plan → Execute → Verify").apply {
+            foreground = JBColor(0x484F58, 0x484F58)
+            font = font.deriveFont(9f)
+            border = JBUI.Borders.emptyTop(2)
+        }
+
+        val topRow = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(inputScroll, BorderLayout.CENTER)
+            add(sendButton, BorderLayout.EAST)
+        }
+
+        panel.add(topRow, BorderLayout.CENTER)
+        panel.add(hintLabel, BorderLayout.SOUTH)
 
         return panel
     }
+
+    // ── Agent Loading ───────────────────────────────────────────────────
 
     private fun loadAgents() {
         scope.launch(Dispatchers.IO) {
@@ -185,195 +194,223 @@ class DispatcherPanel(
 
                 withContext(Dispatchers.Main) {
                     if (agentKeys.isEmpty()) {
-                        logStreamPanel.appendLog(
-                            AgentLogEntry(
-                                level = LogLevel.WRN,
-                                source = "Master",
-                                message = "No ACP agents detected. Configure agents in ~/.acp-manager/config.yaml",
-                            )
-                        )
-                        masterAgentPanel.updateThinking("No agents found. Please configure ACP agents first.")
+                        routaSection.setPlanningText("No ACP agents detected. Configure agents in ~/.acp-manager/config.yaml")
                         return@withContext
                     }
 
-                    masterAgentPanel.setAvailableAgents(agentKeys)
-                    taskListPanel.setAvailableAgents(agentKeys)
+                    // Set available models for CRAFTERs
+                    crafterSection.setAvailableModels(agentKeys)
 
                     val defaultAgent = config.activeAgent ?: agentKeys.firstOrNull()
                     if (defaultAgent != null) {
-                        masterAgentPanel.setSelectedAgent(defaultAgent)
-                    }
-
-                    // Build agent roles from config
-                    val roles = agentKeys.map { key ->
-                        AgentRole(
-                            id = key,
-                            name = config.agents[key]?.description?.ifEmpty { key } ?: key,
-                            acpAgentKey = key,
+                        crafterSection.setSelectedModel(defaultAgent)
+                        // Initialize the Routa service with the default agent
+                        routaService.initialize(
+                            crafterAgent = defaultAgent,
+                            routaAgent = defaultAgent,
+                            gateAgent = defaultAgent,
                         )
                     }
 
-                    // Initialize dispatcher
-                    val ideaExecutor = IdeaAgentExecutor(project)
-                    val ideaPlanGenerator = IdeaPlanGenerator(project)
-                    val agentDispatcher = DefaultAgentDispatcher(ideaPlanGenerator, ideaExecutor, scope)
-                    agentDispatcher.setAgentRoles(roles)
-                    if (defaultAgent != null) {
-                        agentDispatcher.setMasterAgent(defaultAgent)
-                    }
-                    dispatcher = agentDispatcher
-
-                    // Observe state changes
-                    observeDispatcher(agentDispatcher)
-
-                    logStreamPanel.appendLog(
-                        AgentLogEntry(
-                            level = LogLevel.INF,
-                            source = "Master",
-                            message = "Dispatcher ready. ${agentKeys.size} agent(s) available: ${agentKeys.joinToString(", ")}. Master: $defaultAgent",
-                        )
-                    )
+                    log.info("Dispatcher ready. ${agentKeys.size} agent(s): ${agentKeys.joinToString(", ")}")
                 }
             } catch (e: Exception) {
-                log.warn("Failed to initialize dispatcher: ${e.message}", e)
+                log.warn("Failed to load agents: ${e.message}", e)
                 withContext(Dispatchers.Main) {
-                    logStreamPanel.appendLog(
-                        AgentLogEntry(
-                            level = LogLevel.ERR,
-                            source = "Master",
-                            message = "Failed to initialize dispatcher: ${e.message}",
-                        )
-                    )
-                    masterAgentPanel.updateStatus(DispatcherStatus.FAILED)
+                    routaSection.setPlanningText("Failed to load agents: ${e.message}")
                 }
             }
         }
     }
 
-    private fun observeDispatcher(dispatcher: DefaultAgentDispatcher) {
-        // Observe state
+    // ── Routa Service Observation ───────────────────────────────────────
+
+    private fun observeRoutaService() {
+        // Observe orchestration phases
         scope.launch {
-            dispatcher.state.collectLatest { state ->
-                updateUI(state)
+            routaService.phase.collectLatest { phase ->
+                handlePhaseChange(phase)
             }
         }
 
-        // Observe log stream — forward to both log panel and task card output previews
+        // Observe coordination state (for phase mapping to UI)
         scope.launch {
-            dispatcher.logStream.collect { logEntry ->
-                logStreamPanel.appendLog(logEntry)
-                // Forward content to task card output preview
-                val taskId = logEntry.taskId
-                if (taskId != null && logEntry.level == LogLevel.INF) {
-                    val card = taskListPanel.getTaskCard(taskId)
-                    if (card != null && logEntry.message.isNotBlank()) {
-                        card.appendOutput(logEntry.message + "\n")
-                    }
+            routaService.coordinationState.collectLatest { state ->
+                routaSection.updatePhase(state.phase)
+
+                // Update GATE section based on phase
+                when (state.phase) {
+                    CoordinationPhase.VERIFYING -> gateSection.updateStatus(true)
+                    CoordinationPhase.COMPLETED -> gateSection.updateStatus(false)
+                    else -> {}
                 }
+            }
+        }
+
+        // Observe ROUTA streaming chunks
+        scope.launch {
+            routaService.routaChunks.collect { chunk ->
+                routaSection.appendChunk(chunk)
+            }
+        }
+
+        // Observe GATE streaming chunks
+        scope.launch {
+            routaService.gateChunks.collect { chunk ->
+                gateSection.appendChunk(chunk)
+            }
+        }
+
+        // Observe CRAFTER states
+        scope.launch {
+            routaService.crafterStates.collectLatest { states ->
+                crafterSection.updateCrafterStates(states)
+            }
+        }
+
+        // Observe running state (for UI enable/disable)
+        scope.launch {
+            routaService.isRunning.collectLatest { running ->
+                // Could disable input while running
             }
         }
     }
 
-    private fun updateUI(state: DispatcherState) {
-        masterAgentPanel.updateStatus(state.status)
+    // ── Phase Handling ──────────────────────────────────────────────────
 
-        // Show final output when available
-        masterAgentPanel.updateFinalOutput(state.finalOutput)
+    private fun handlePhaseChange(phase: OrchestratorPhase) {
+        when (phase) {
+            is OrchestratorPhase.Initializing -> {
+                routaSection.updatePhase(CoordinationPhase.IDLE)
+            }
 
-        state.plan?.let { plan ->
-            masterAgentPanel.updateThinking(plan.thinking)
-            masterAgentPanel.updatePlanItems(
-                plan.tasks.mapIndexed { index, task ->
-                    PlanItemDisplay(
-                        index = String.format("%02d", index + 1),
-                        text = task.title,
-                        status = task.status.name,
-                    )
-                }
-            )
-            taskListPanel.updateTasks(plan.tasks)
-            taskListPanel.setParallelism(plan.maxParallelism)
-            taskListPanel.updateActiveAgents(plan.activeTasks, plan.totalTasks)
+            is OrchestratorPhase.Planning -> {
+                routaSection.updatePhase(CoordinationPhase.PLANNING)
+                routaSection.clear()
+                crafterSection.clear()
+                gateSection.clear()
+            }
 
-            // Disable execute when already running/completed
-            taskListPanel.setExecuteEnabled(
-                state.status != DispatcherStatus.RUNNING &&
-                        state.status != DispatcherStatus.COMPLETED
-            )
+            is OrchestratorPhase.PlanReady -> {
+                routaSection.updatePhase(CoordinationPhase.READY)
+                routaSection.setPlanningText(phase.planOutput)
+            }
+
+            is OrchestratorPhase.TasksRegistered -> {
+                log.info("${phase.count} tasks registered")
+            }
+
+            is OrchestratorPhase.WaveStarting -> {
+                routaSection.updatePhase(CoordinationPhase.EXECUTING)
+            }
+
+            is OrchestratorPhase.CrafterRunning -> {
+                // CrafterSectionPanel handles this via crafterStates
+            }
+
+            is OrchestratorPhase.CrafterCompleted -> {
+                // CrafterSectionPanel handles this via crafterStates
+            }
+
+            is OrchestratorPhase.VerificationStarting -> {
+                gateSection.updateStatus(true)
+                gateSection.clear()
+            }
+
+            is OrchestratorPhase.VerificationCompleted -> {
+                gateSection.updateStatus(false)
+            }
+
+            is OrchestratorPhase.NeedsFix -> {
+                routaSection.updatePhase(CoordinationPhase.NEEDS_FIX)
+            }
+
+            is OrchestratorPhase.Completed -> {
+                routaSection.updatePhase(CoordinationPhase.COMPLETED)
+            }
+
+            is OrchestratorPhase.MaxWavesReached -> {
+                routaSection.updatePhase(CoordinationPhase.COMPLETED)
+            }
         }
     }
 
-    private fun startPlanning(userInput: String) {
-        val d = dispatcher
-        if (d == null) {
-            logStreamPanel.appendLog(
-                AgentLogEntry(
-                    level = LogLevel.ERR,
-                    source = "Master",
-                    message = "Dispatcher not initialized. No agents configured?",
-                )
-            )
+    // ── Execution ───────────────────────────────────────────────────────
+
+    private fun startExecution(userInput: String) {
+        if (routaService.isRunning.value) {
+            log.info("Already running, ignoring request")
             return
         }
 
-        logStreamPanel.clearLogs()
-
-        // Immediate UI feedback
-        masterAgentPanel.updateStatus(DispatcherStatus.PLANNING)
-        masterAgentPanel.updateThinking("Planning: $userInput")
-        logStreamPanel.appendLog(
-            AgentLogEntry(
-                level = LogLevel.INF,
-                source = "Master",
-                message = "User request: ${userInput.take(100)}...",
+        // Re-initialize with current model selections
+        val crafterModel = routaService.crafterModelKey.value
+        if (crafterModel.isNotBlank()) {
+            routaService.initialize(
+                crafterAgent = crafterModel,
+                routaAgent = routaService.routaModelKey.value.ifBlank { crafterModel },
+                gateAgent = routaService.gateModelKey.value.ifBlank { crafterModel },
             )
-        )
+        }
+
+        // Clear all panels
+        routaSection.clear()
+        crafterSection.clear()
+        gateSection.clear()
 
         scope.launch {
             try {
-                d.startPlanning(userInput)
+                val result = routaService.execute(userInput)
+                handleResult(result)
             } catch (e: Exception) {
-                log.warn("Planning failed: ${e.message}", e)
-                masterAgentPanel.updateStatus(DispatcherStatus.FAILED)
-                masterAgentPanel.updateThinking("Planning failed: ${e.message}")
-                logStreamPanel.appendLog(
-                    AgentLogEntry(
-                        level = LogLevel.ERR,
-                        source = "Master",
-                        message = "Planning failed: ${e.message}",
-                    )
-                )
+                log.warn("Execution failed: ${e.message}", e)
+                routaSection.updatePhase(CoordinationPhase.FAILED)
+                routaSection.setPlanningText("Execution failed: ${e.message}")
             }
         }
     }
 
-    private fun executePlan() {
-        val d = dispatcher ?: return
-        logStreamPanel.appendLog(
-            AgentLogEntry(
-                level = LogLevel.INF,
-                source = "Master",
-                message = "Starting plan execution...",
-            )
-        )
-        scope.launch {
-            try {
-                d.executePlan()
-            } catch (e: Exception) {
-                log.warn("Execution failed: ${e.message}", e)
-                logStreamPanel.appendLog(
-                    AgentLogEntry(
-                        level = LogLevel.ERR,
-                        source = "Master",
-                        message = "Execution failed: ${e.message}",
+    private fun handleResult(result: OrchestratorResult) {
+        when (result) {
+            is OrchestratorResult.Success -> {
+                routaSection.updatePhase(CoordinationPhase.COMPLETED)
+                val summary = result.taskSummaries.joinToString("\n") { task ->
+                    "  ${task.title}: ${task.status} (verdict: ${task.verdict ?: "N/A"})"
+                }
+                routaSection.appendChunk(
+                    com.phodal.routa.core.provider.StreamChunk.Text("\n\n--- Results ---\n$summary")
+                )
+
+                // Update GATE verdict from task summaries
+                val allApproved = result.taskSummaries.all {
+                    it.verdict == com.phodal.routa.core.model.VerificationVerdict.APPROVED
+                }
+                if (allApproved) {
+                    gateSection.setVerdict(com.phodal.routa.core.model.VerificationVerdict.APPROVED)
+                }
+            }
+
+            is OrchestratorResult.NoTasks -> {
+                routaSection.setPlanningText("No tasks generated from the plan:\n${result.planOutput}")
+            }
+
+            is OrchestratorResult.MaxWavesReached -> {
+                routaSection.appendChunk(
+                    com.phodal.routa.core.provider.StreamChunk.Text(
+                        "\n\nMax waves (${result.waves}) reached. Some tasks may be incomplete."
                     )
                 )
+            }
+
+            is OrchestratorResult.Failed -> {
+                routaSection.updatePhase(CoordinationPhase.FAILED)
+                routaSection.setPlanningText("Orchestration failed: ${result.error}")
             }
         }
     }
 
     override fun dispose() {
-        dispatcher?.reset()
+        routaService.reset()
         scope.cancel()
     }
 }
