@@ -81,6 +81,9 @@ dependencies {
     // YAML config
     implementation(libs.snakeyaml)
 
+    // Routa multi-agent coordination core
+    implementation(project(":routa-core"))
+
     testImplementation(libs.junit)
     testImplementation(libs.opentest4j)
     testImplementation(libs.kotlinx.coroutines.test)
@@ -102,6 +105,8 @@ dependencies {
         bundledModules(providers.gradleProperty("platformBundledModules").map { it.split(',') })
 
         testFramework(TestFrameworkType.Platform)
+        testFramework(TestFrameworkType.Plugin.Java)
+        testFramework(TestFrameworkType.Bundled)
     }
 }
 

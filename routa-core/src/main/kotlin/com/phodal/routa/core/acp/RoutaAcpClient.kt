@@ -1,4 +1,4 @@
-package com.github.phodal.acpmanager.acp
+package com.phodal.routa.core.acp
 
 import com.agentclientprotocol.client.Client
 import com.agentclientprotocol.client.ClientInfo
@@ -10,7 +10,6 @@ import com.agentclientprotocol.common.SessionCreationParameters
 import com.agentclientprotocol.model.*
 import com.agentclientprotocol.protocol.Protocol
 import com.agentclientprotocol.transport.StdioTransport
-import com.intellij.openapi.diagnostic.logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -20,20 +19,20 @@ import kotlinx.io.RawSource
 import kotlinx.io.buffered
 import kotlinx.serialization.json.JsonNull
 
-private val log = logger<AcpClient>()
-
 /**
- * ACP Client that connects to external ACP agents (e.g., Claude CLI, Codex CLI, Gemini CLI).
+ * ACP Client for routa-core — platform-independent version.
  *
- * Handles the full ACP lifecycle: transport setup, protocol initialization, session creation,
- * and prompt streaming.
+ * Connects to an ACP agent over stdio (JSON-RPC), creates a session,
+ * and sends prompts with streaming event collection.
+ *
+ * Extracted from the IntelliJ plugin, with no IDE dependencies.
  */
-class AcpClient(
+class RoutaAcpClient(
     private val coroutineScope: CoroutineScope,
     private val input: RawSource,
     private val output: RawSink,
-    private val clientName: String = "acp-manager",
-    private val clientVersion: String = "0.0.1",
+    private val clientName: String = "routa-core",
+    private val clientVersion: String = "0.1.0",
     private val cwd: String = "",
     private val agentName: String = "acp-agent",
 ) {
@@ -43,21 +42,13 @@ class AcpClient(
 
     val isConnected: Boolean get() = session != null
 
-    var promptCount: Int = 0
-        private set
-
     /**
      * Callback for session update notifications.
      */
     var onSessionUpdate: ((SessionUpdate) -> Unit)? = null
 
     /**
-     * Callback for permission requests from the agent.
-     */
-    var onPermissionRequest: ((SessionUpdate.ToolCallUpdate, List<PermissionOption>) -> RequestPermissionResponse)? = null
-
-    /**
-     * Connect to the ACP agent: set up transport, initialize protocol, create session.
+     * Connect to the ACP agent: transport → protocol → session.
      */
     suspend fun connect() {
         val transport = StdioTransport(
@@ -74,23 +65,21 @@ class AcpClient(
         this.protocol = proto
         this.client = acpClient
 
-        val fsCapabilities = FileSystemCapability(
-            readTextFile = true,
-            writeTextFile = true,
-            _meta = JsonNull
-        )
-
         val clientInfo = ClientInfo(
             protocolVersion = 1,
             capabilities = ClientCapabilities(
-                fs = fsCapabilities,
+                fs = FileSystemCapability(
+                    readTextFile = true,
+                    writeTextFile = true,
+                    _meta = JsonNull
+                ),
                 terminal = true,
                 _meta = JsonNull
             ),
             implementation = Implementation(
                 name = clientName,
                 version = clientVersion,
-                title = "ACP Manager (IntelliJ Plugin)",
+                title = "Routa Multi-Agent Orchestrator",
                 _meta = JsonNull
             ),
             _meta = JsonNull
@@ -103,15 +92,9 @@ class AcpClient(
                 sessionId: SessionId,
                 sessionResponse: AcpCreatedSessionResponse,
             ): ClientSessionOperations {
-                return AcpClientSessionOps(
+                return RoutaAcpSessionOps(
                     onSessionUpdate = { update -> onSessionUpdate?.invoke(update) },
-                    onPermissionRequest = { toolCall, options ->
-                        onPermissionRequest?.invoke(toolCall, options)
-                            ?: defaultPermissionResponse(options)
-                    },
                     cwd = cwd,
-                    enableFs = true,
-                    enableTerminal = true,
                 )
             }
         }
@@ -125,8 +108,6 @@ class AcpClient(
             operationsFactory
         )
         this.session = acpSession
-
-        log.info("ACP client connected successfully (session=${acpSession.sessionId}, agent=$agentName)")
     }
 
     /**
@@ -134,28 +115,13 @@ class AcpClient(
      */
     fun prompt(text: String): Flow<Event> = flow {
         val sess = session ?: throw IllegalStateException("ACP client not connected")
-
         val contentBlocks = listOf(ContentBlock.Text(text, Annotations(), JsonNull))
         val eventFlow = sess.prompt(contentBlocks, JsonNull)
-
-        eventFlow.collect { event ->
-            emit(event)
-        }
+        eventFlow.collect { event -> emit(event) }
     }
 
     /**
-     * Cancel the current prompt turn.
-     */
-    suspend fun cancel() {
-        try {
-            session?.cancel()
-        } catch (e: Exception) {
-            log.warn("Failed to cancel ACP session", e)
-        }
-    }
-
-    /**
-     * Disconnect from the agent and clean up resources.
+     * Disconnect and clean up.
      */
     suspend fun disconnect() {
         try {
@@ -165,20 +131,24 @@ class AcpClient(
         protocol = null
         client = null
         session = null
-        log.info("ACP client disconnected")
-    }
-
-    /**
-     * Increment prompt count (called after successful prompt).
-     */
-    fun incrementPromptCount() {
-        promptCount++
     }
 
     companion object {
-        private fun defaultPermissionResponse(
-            options: List<PermissionOption>,
-        ): RequestPermissionResponse {
+        /**
+         * Extract text from an ACP ContentBlock.
+         */
+        fun extractText(block: ContentBlock): String = when (block) {
+            is ContentBlock.Text -> block.text
+            is ContentBlock.Resource -> block.resource.toString().take(500)
+            is ContentBlock.ResourceLink -> "[ResourceLink: ${block.name}]"
+            is ContentBlock.Image -> "[Image]"
+            is ContentBlock.Audio -> "[Audio]"
+        }
+
+        /**
+         * Default permission response: auto-approve.
+         */
+        fun defaultPermissionResponse(options: List<PermissionOption>): RequestPermissionResponse {
             val allow = options.firstOrNull {
                 it.kind == PermissionOptionKind.ALLOW_ONCE || it.kind == PermissionOptionKind.ALLOW_ALWAYS
             }
@@ -186,23 +156,6 @@ class AcpClient(
                 RequestPermissionResponse(RequestPermissionOutcome.Selected(allow.optionId), JsonNull)
             } else {
                 RequestPermissionResponse(RequestPermissionOutcome.Cancelled, JsonNull)
-            }
-        }
-
-        /**
-         * Extract text content from an ACP ContentBlock.
-         */
-        fun extractText(block: ContentBlock): String {
-            return when (block) {
-                is ContentBlock.Text -> block.text
-                is ContentBlock.Resource -> {
-                    val resourceStr = block.resource.toString()
-                    if (resourceStr.length > 500) "[Resource: ${resourceStr.take(500)}...]"
-                    else resourceStr
-                }
-                is ContentBlock.ResourceLink -> "[Resource Link: ${block.name} (${block.uri})]"
-                is ContentBlock.Image -> "[Image: mimeType=${block.mimeType}]"
-                is ContentBlock.Audio -> "[Audio: mimeType=${block.mimeType}]"
             }
         }
     }
