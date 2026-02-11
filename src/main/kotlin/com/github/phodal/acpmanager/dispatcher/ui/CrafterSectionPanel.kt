@@ -520,6 +520,15 @@ class CrafterDetailPanel : JPanel(BorderLayout()) {
                         kind = null,
                     )
                 )
+                // Send parameters if available
+                chunk.arguments?.let { args ->
+                    renderer.onEvent(
+                        RenderEvent.ToolCallParameterUpdate(
+                            toolCallId = id,
+                            partialParameters = args,
+                        )
+                    )
+                }
             }
 
             ToolCallStatus.IN_PROGRESS -> {
@@ -531,6 +540,15 @@ class CrafterDetailPanel : JPanel(BorderLayout()) {
                         title = chunk.name,
                     )
                 )
+                // Update parameters if available
+                chunk.arguments?.let { args ->
+                    renderer.onEvent(
+                        RenderEvent.ToolCallParameterUpdate(
+                            toolCallId = id,
+                            partialParameters = args,
+                        )
+                    )
+                }
             }
 
             ToolCallStatus.COMPLETED -> {

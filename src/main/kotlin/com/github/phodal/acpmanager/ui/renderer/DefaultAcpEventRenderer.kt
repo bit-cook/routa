@@ -57,7 +57,7 @@ class DefaultAcpEventRenderer(
             is RenderEvent.MessageEnd -> endMessage(event.fullContent)
             is RenderEvent.ToolCallStart -> startToolCall(event)
             is RenderEvent.ToolCallUpdate -> updateToolCall(event)
-            is RenderEvent.ToolCallParameterUpdate -> { /* Parameter streaming - can be logged or ignored */ }
+            is RenderEvent.ToolCallParameterUpdate -> updateToolCallParameters(event)
             is RenderEvent.ToolCallEnd -> endToolCall(event)
             is RenderEvent.PlanUpdate -> addPlanUpdate(event)
             is RenderEvent.ModeChange -> addInfo("Mode: ${event.modeId}", event.timestamp)
@@ -163,6 +163,10 @@ class DefaultAcpEventRenderer(
 
     private fun updateToolCall(event: RenderEvent.ToolCallUpdate) {
         toolCallPanels[event.toolCallId]?.updateStatus(event.status, event.title)
+    }
+
+    private fun updateToolCallParameters(event: RenderEvent.ToolCallParameterUpdate) {
+        toolCallPanels[event.toolCallId]?.updateParameters(event.partialParameters)
     }
 
     private fun endToolCall(event: RenderEvent.ToolCallEnd) {

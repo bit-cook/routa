@@ -109,6 +109,7 @@ class ToolCallPanel(
     private val resultArea: JTextArea
     private var currentTitle: String = initialTitle
     private var isCompleted = false
+    private var parametersContent: String = ""
 
     init {
         isOpaque = true
@@ -166,6 +167,24 @@ class ToolCallPanel(
             ToolCallStatus.PENDING -> "○"
             else -> "■"
         }
+        revalidate()
+        repaint()
+    }
+
+    /**
+     * Update the tool call parameters.
+     * This displays the parameters in the result area while the tool is running.
+     */
+    fun updateParameters(params: String) {
+        if (isCompleted) return
+        parametersContent = params
+
+        // Show parameters in result area while tool is running
+        val displayText = if (params.length > 500) params.take(500) + "..." else params
+        resultArea.text = displayText
+        resultArea.foreground = JBColor(Color(0xE65100), Color(0xFFB74D))
+        resultArea.isVisible = true
+
         revalidate()
         repaint()
     }
