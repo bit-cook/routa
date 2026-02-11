@@ -9,13 +9,23 @@ import java.awt.event.MouseEvent
 import javax.swing.*
 
 /**
- * Right-side agent sidebar — a vertical list of clickable agent cards.
+ * Right-side agent sidebar — divided into three visual sections:
  *
- * Fixed order: **ROUTA** always first, **GATE** always last,
- * CRAFTER cards are dynamically inserted between them as tasks are created.
+ * ```
+ * ┌──────────────────────────┐
+ * │  ROUTA                   │  ← Section 1: always one card
+ * ├─ ─ ─ CRAFTERs ─ ─ ─ ─ ─┤
+ * │  (placeholder or cards)  │  ← Section 2: dynamic, colored header
+ * │  CRAFTER-1               │
+ * │  CRAFTER-2               │
+ * ├─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┤
+ * │  GATE                    │  ← Section 3: always one card
+ * └──────────────────────────┘
+ * ```
  *
- * Each card shows a status dot, role label, short info, and highlights when selected.
- * Clicking a card fires [onAgentSelected].
+ * ROUTA is always first, GATE always last.
+ * CRAFTERs are dynamically inserted in the middle section.
+ * Each section has a colored header label.
  */
 class AgentSidebarPanel : JPanel(BorderLayout()) {
 
@@ -25,8 +35,15 @@ class AgentSidebarPanel : JPanel(BorderLayout()) {
         val CARD_SELECTED_BG = JBColor(0x1C2333, 0x1C2333)
         val CARD_HOVER_BG = JBColor(0x1A2030, 0x1A2030)
         val CARD_BORDER = JBColor(0x21262D, 0x21262D)
+        val SECTION_BORDER = JBColor(0x30363D, 0x30363D)
         val TEXT_PRIMARY = JBColor(0xC9D1D9, 0xC9D1D9)
         val TEXT_SECONDARY = JBColor(0x8B949E, 0x8B949E)
+        val TEXT_PLACEHOLDER = JBColor(0x484F58, 0x484F58)
+
+        // Section accent colors
+        val ROUTA_ACCENT = JBColor(0x58A6FF, 0x58A6FF)
+        val CRAFTER_ACCENT = JBColor(0x10B981, 0x10B981)
+        val GATE_ACCENT = JBColor(0xA78BFA, 0xA78BFA)
 
         // Status colors
         val STATUS_IDLE = JBColor(0x6B7280, 0x9CA3AF)
@@ -42,11 +59,11 @@ class AgentSidebarPanel : JPanel(BorderLayout()) {
 
     // ── Internal state ───────────────────────────────────────────────────
 
-    /** Ordered list of agent IDs in display order. */
-    private val agentOrder = mutableListOf<String>()
-
     /** Maps agentId → sidebar card component. */
     private val cards = mutableMapOf<String, SidebarCard>()
+
+    /** Ordered list of CRAFTER IDs. */
+    private val crafterOrder = mutableListOf<String>()
 
     /** Currently selected agent ID. */
     var selectedAgentId: String? = null
@@ -56,40 +73,146 @@ class AgentSidebarPanel : JPanel(BorderLayout()) {
     private val routaId = "__routa__"
     private val gateId = "__gate__"
 
-    // ── UI components ────────────────────────────────────────────────────
+    // ── Section panels ───────────────────────────────────────────────────
 
-    private val headerLabel = JBLabel("Agents").apply {
-        foreground = TEXT_SECONDARY
-        font = font.deriveFont(Font.BOLD, 11f)
-        border = JBUI.Borders.empty(8, 12, 6, 12)
-    }
+    // ROUTA section
+    private val routaCard = SidebarCard(
+        agentId = routaId,
+        roleLabel = "ROUTA",
+        info = "Coordinator",
+        accentColor = ROUTA_ACCENT,
+        onClick = { selectAgent(routaId) }
+    )
 
-    private val cardListPanel = JPanel().apply {
+    // CRAFTERs section
+    private val crafterListPanel = JPanel().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        isOpaque = true
-        background = SIDEBAR_BG
+        isOpaque = false
     }
 
-    private val cardListScroll = JScrollPane(cardListPanel).apply {
-        border = JBUI.Borders.empty()
-        verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
-        horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
-        isOpaque = true
-        viewport.isOpaque = true
-        viewport.background = SIDEBAR_BG
+    private val crafterPlaceholder = JBLabel("Waiting for ROUTA to plan tasks...").apply {
+        foreground = TEXT_PLACEHOLDER
+        font = font.deriveFont(Font.ITALIC, 11f)
+        border = JBUI.Borders.empty(12, 16)
+        alignmentX = Component.LEFT_ALIGNMENT
     }
+
+    private val crafterCountLabel = JBLabel("0").apply {
+        foreground = TEXT_SECONDARY
+        font = font.deriveFont(9f)
+    }
+
+    // GATE section
+    private val gateCard = SidebarCard(
+        agentId = gateId,
+        roleLabel = "GATE",
+        info = "Verifier",
+        accentColor = GATE_ACCENT,
+        onClick = { selectAgent(gateId) }
+    )
 
     init {
         isOpaque = true
         background = SIDEBAR_BG
         border = JBUI.Borders.customLineLeft(CARD_BORDER)
 
-        add(headerLabel, BorderLayout.NORTH)
-        add(cardListScroll, BorderLayout.CENTER)
+        cards[routaId] = routaCard
+        cards[gateId] = gateCard
 
-        // Create fixed ROUTA and GATE cards
-        addFixedCard(routaId, "ROUTA", "Coordinator")
-        addFixedCard(gateId, "GATE", "Verifier")
+        val mainPanel = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = true
+            background = SIDEBAR_BG
+        }
+
+        // ── ROUTA section ───────────────────────────────────────────────
+        val routaSection = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            alignmentX = Component.LEFT_ALIGNMENT
+            maximumSize = Dimension(Int.MAX_VALUE, 80)
+
+            add(createSectionHeader("ROUTA", ROUTA_ACCENT, null), BorderLayout.NORTH)
+            routaCard.alignmentX = Component.LEFT_ALIGNMENT
+            routaCard.maximumSize = Dimension(Int.MAX_VALUE, 48)
+            add(routaCard, BorderLayout.CENTER)
+        }
+        mainPanel.add(routaSection)
+
+        // ── CRAFTERs section ────────────────────────────────────────────
+        val crafterSection = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            alignmentX = Component.LEFT_ALIGNMENT
+
+            add(createSectionHeader("CRAFTERs", CRAFTER_ACCENT, crafterCountLabel), BorderLayout.NORTH)
+
+            val crafterContent = JPanel(BorderLayout()).apply {
+                isOpaque = false
+                add(crafterPlaceholder, BorderLayout.NORTH)
+                add(crafterListPanel, BorderLayout.CENTER)
+            }
+            add(crafterContent, BorderLayout.CENTER)
+        }
+        mainPanel.add(crafterSection)
+
+        // ── GATE section ────────────────────────────────────────────────
+        val gateSection = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            alignmentX = Component.LEFT_ALIGNMENT
+            maximumSize = Dimension(Int.MAX_VALUE, 80)
+
+            add(createSectionHeader("GATE", GATE_ACCENT, null), BorderLayout.NORTH)
+            gateCard.alignmentX = Component.LEFT_ALIGNMENT
+            gateCard.maximumSize = Dimension(Int.MAX_VALUE, 48)
+            add(gateCard, BorderLayout.CENTER)
+        }
+        mainPanel.add(gateSection)
+
+        mainPanel.add(Box.createVerticalGlue())
+
+        val scrollPane = JScrollPane(mainPanel).apply {
+            border = JBUI.Borders.empty()
+            verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
+            horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+            isOpaque = true
+            viewport.isOpaque = true
+            viewport.background = SIDEBAR_BG
+        }
+
+        add(scrollPane, BorderLayout.CENTER)
+    }
+
+    // ── Section Header Factory ───────────────────────────────────────────
+
+    private fun createSectionHeader(
+        label: String,
+        accentColor: Color,
+        countLabel: JBLabel?,
+    ): JPanel {
+        return JPanel(BorderLayout()).apply {
+            isOpaque = true
+            background = JBColor(0x111921, 0x111921)
+            border = BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(1, 0, 1, 0, SECTION_BORDER),
+                JBUI.Borders.empty(4, 12, 4, 12)
+            )
+            maximumSize = Dimension(Int.MAX_VALUE, 28)
+
+            val leftContent = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+                isOpaque = false
+                add(JBLabel("●").apply {
+                    foreground = accentColor
+                    font = font.deriveFont(8f)
+                })
+                add(JBLabel(label).apply {
+                    foreground = accentColor
+                    font = font.deriveFont(Font.BOLD, 10f)
+                })
+                if (countLabel != null) {
+                    add(countLabel)
+                }
+            }
+            add(leftContent, BorderLayout.WEST)
+        }
     }
 
     // ── Public API ───────────────────────────────────────────────────────
@@ -101,7 +224,7 @@ class AgentSidebarPanel : JPanel(BorderLayout()) {
     fun getGateId(): String = gateId
 
     /**
-     * Add a CRAFTER card. Inserted before GATE (always last).
+     * Add a CRAFTER card to the CRAFTERs section.
      */
     fun addCrafter(taskId: String, title: String) {
         SwingUtilities.invokeLater {
@@ -111,19 +234,22 @@ class AgentSidebarPanel : JPanel(BorderLayout()) {
                 agentId = taskId,
                 roleLabel = "CRAFTER",
                 info = truncate(title, 24),
+                accentColor = CRAFTER_ACCENT,
                 onClick = { selectAgent(taskId) }
             )
             cards[taskId] = card
+            crafterOrder.add(taskId)
 
-            // Insert before GATE
-            val gateIndex = agentOrder.indexOf(gateId)
-            if (gateIndex >= 0) {
-                agentOrder.add(gateIndex, taskId)
-            } else {
-                agentOrder.add(taskId)
-            }
+            // Hide placeholder, show card
+            crafterPlaceholder.isVisible = false
+            card.alignmentX = Component.LEFT_ALIGNMENT
+            card.maximumSize = Dimension(Int.MAX_VALUE, 48)
+            crafterListPanel.add(card)
 
-            rebuildCardList()
+            crafterCountLabel.text = "${crafterOrder.size}"
+
+            crafterListPanel.revalidate()
+            crafterListPanel.repaint()
         }
     }
 
@@ -161,18 +287,21 @@ class AgentSidebarPanel : JPanel(BorderLayout()) {
      */
     fun clear() {
         SwingUtilities.invokeLater {
-            // Remove all crafter cards
-            val crafterIds = agentOrder.filter { it != routaId && it != gateId }
-            crafterIds.forEach { id ->
-                cards.remove(id)
-                agentOrder.remove(id)
-            }
+            // Remove all CRAFTER cards
+            crafterOrder.clear()
+            val crafterIds = cards.keys.filter { it != routaId && it != gateId }
+            crafterIds.forEach { cards.remove(it) }
+
+            crafterListPanel.removeAll()
+            crafterPlaceholder.isVisible = true
+            crafterCountLabel.text = "0"
 
             // Reset ROUTA and GATE status
             cards[routaId]?.updateStatus("IDLE", STATUS_IDLE)
             cards[gateId]?.updateStatus("IDLE", STATUS_IDLE)
 
-            rebuildCardList()
+            crafterListPanel.revalidate()
+            crafterListPanel.repaint()
 
             // Select ROUTA by default
             selectAgent(routaId)
@@ -180,32 +309,6 @@ class AgentSidebarPanel : JPanel(BorderLayout()) {
     }
 
     // ── Internal ─────────────────────────────────────────────────────────
-
-    private fun addFixedCard(id: String, role: String, info: String) {
-        val card = SidebarCard(
-            agentId = id,
-            roleLabel = role,
-            info = info,
-            onClick = { selectAgent(id) }
-        )
-        cards[id] = card
-        agentOrder.add(id)
-        rebuildCardList()
-    }
-
-    private fun rebuildCardList() {
-        cardListPanel.removeAll()
-        for (id in agentOrder) {
-            cards[id]?.let { card ->
-                card.alignmentX = Component.LEFT_ALIGNMENT
-                card.maximumSize = Dimension(Int.MAX_VALUE, 48)
-                cardListPanel.add(card)
-            }
-        }
-        cardListPanel.add(Box.createVerticalGlue())
-        cardListPanel.revalidate()
-        cardListPanel.repaint()
-    }
 
     private fun truncate(text: String, maxLen: Int): String {
         val clean = text.trim()
@@ -225,6 +328,7 @@ private class SidebarCard(
     val agentId: String,
     roleLabel: String,
     info: String,
+    private val accentColor: Color,
     private val onClick: () -> Unit,
 ) : JPanel(BorderLayout()) {
 
@@ -297,7 +401,7 @@ private class SidebarCard(
 
         border = if (selected) {
             BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(0, 3, 1, 0, AgentSidebarPanel.STATUS_ACTIVE),
+                BorderFactory.createMatteBorder(0, 3, 1, 0, accentColor),
                 JBUI.Borders.empty(8, 9, 8, 12)
             )
         } else {

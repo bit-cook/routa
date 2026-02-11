@@ -31,6 +31,9 @@ class ToolCallPanel(
     private var inputContent: String = ""
     private var outputContent: String = ""
 
+    // Inline parameter label shown after tool name in the header
+    private val paramHintLabel: JBLabel
+
     // Summary label for compact display when collapsed
     private val summaryLabel: JBLabel
 
@@ -44,12 +47,23 @@ class ToolCallPanel(
             font = font.deriveFont(12f)
         }
 
-        // Reorganize header: [status] [expand] [title] ... [summary]
+        // Reorganize header: [status] [expand] [title] [paramHint] ... [summary]
         headerPanel.remove(headerIcon)
+        headerPanel.remove(headerTitle)
+
+        // Inline parameter hint - shown after tool name
+        paramHintLabel = JBLabel().apply {
+            foreground = UIUtil.getLabelDisabledForeground()
+            font = UIUtil.getLabelFont().deriveFont(Font.PLAIN, UIUtil.getLabelFont().size2D - 1)
+            isVisible = false
+        }
+
         val leftPanel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
             isOpaque = false
             add(statusIcon)
             add(headerIcon)
+            add(headerTitle)
+            add(paramHintLabel)
         }
         headerPanel.add(leftPanel, BorderLayout.WEST)
 
@@ -112,14 +126,29 @@ class ToolCallPanel(
 
     /**
      * Update the input parameters.
+     * Also extracts a key parameter to show inline in the header.
      */
     fun updateParameters(params: String) {
         if (isCompleted) return
         inputContent = params
+        updateParamHint(params)
         updateContentArea()
         revalidate()
         repaint()
         parent?.revalidate()
+    }
+
+    /**
+     * Extract the most relevant parameter value and show it inline
+     * after the tool name in the header (e.g. "read-file · path/to/file").
+     */
+    private fun updateParamHint(params: String) {
+        val hint = extractKeyParam(params)
+        if (hint != null) {
+            val display = if (hint.length > 60) hint.takeLast(57) + "..." else hint
+            paramHintLabel.text = "  $display"
+            paramHintLabel.isVisible = true
+        }
     }
 
     private fun updateContentArea() {
@@ -134,6 +163,45 @@ class ToolCallPanel(
         }
         contentArea.text = content
         contentArea.isVisible = content.isNotEmpty()
+    }
+
+    companion object {
+        // Keys commonly containing the most useful short identifier for a tool call
+        private val KEY_PARAM_NAMES = listOf(
+            "file_path", "filePath", "path", "filename", "file",       // file operations
+            "command", "cmd",                                           // shell
+            "query", "pattern", "search", "regex",                     // search
+            "url", "uri",                                               // network
+            "content", "text", "message",                               // content
+            "description",                                              // meta
+        )
+
+        /**
+         * Best-effort extraction of a key parameter from a JSON-like parameter string.
+         * Works with both `{"key": "value"}` JSON and `key: value` plain formats.
+         */
+        fun extractKeyParam(params: String): String? {
+            if (params.isBlank()) return null
+
+            val trimmed = params.trim()
+
+            // Try JSON extraction: look for "key": "value" patterns
+            for (key in KEY_PARAM_NAMES) {
+                // Match "key": "value" or "key":"value"
+                val jsonPattern = """"$key"\s*:\s*"([^"]+)"""".toRegex()
+                jsonPattern.find(trimmed)?.let { match ->
+                    return match.groupValues[1]
+                }
+            }
+
+            // Fallback: if it's a short single-line string, use it directly
+            if (!trimmed.startsWith("{") && !trimmed.startsWith("[") && trimmed.length < 80) {
+                val firstLine = trimmed.lineSequence().firstOrNull()?.trim()
+                if (firstLine != null && firstLine.length < 80) return firstLine
+            }
+
+            return null
+        }
     }
 
     /**
