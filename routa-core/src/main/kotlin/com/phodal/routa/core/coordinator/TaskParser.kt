@@ -28,6 +28,12 @@ import java.util.UUID
  * - ./gradlew test
  * @@@
  * ```
+ *
+ * Supports both English and Chinese section headers:
+ * - Objective / 目标
+ * - Scope / 范围
+ * - Definition of Done / 完成标准 / 验收标准
+ * - Verification / 验证
  */
 object TaskParser {
 
@@ -37,29 +43,79 @@ object TaskParser {
     )
 
     /**
+     * Section name aliases: maps each canonical section to all recognized header names.
+     * Supports English and Chinese headers that LLMs commonly produce.
+     */
+    private val SECTION_ALIASES = mapOf(
+        "Objective" to listOf("Objective", "目标", "Goal", "目的"),
+        "Scope" to listOf("Scope", "范围", "作用域"),
+        "Definition of Done" to listOf(
+            "Definition of Done", "完成标准", "验收标准",
+            "Acceptance Criteria", "Done Criteria", "完成条件",
+        ),
+        "Verification" to listOf("Verification", "验证", "Verify", "验证方法", "测试验证"),
+    )
+
+    /**
      * Parse all `@@@task` blocks from the given text.
+     *
+     * If the LLM places multiple tasks inside a single `@@@task` block
+     * (identified by multiple `# ` level-1 headers), they are automatically
+     * split into separate tasks.
      *
      * @param text The Routa output containing task blocks.
      * @param workspaceId The workspace these tasks belong to.
      * @return List of parsed tasks.
      */
     fun parse(text: String, workspaceId: String): List<Task> {
-        return TASK_BLOCK_REGEX.findAll(text).map { match ->
-            parseTaskBlock(match.groupValues[1].trim(), workspaceId)
-        }.toList()
+        val blocks = TASK_BLOCK_REGEX.findAll(text).map { it.groupValues[1].trim() }.toList()
+
+        if (blocks.isEmpty()) return emptyList()
+
+        return blocks.flatMap { block ->
+            splitMultiTaskBlock(block).map { subBlock ->
+                parseTaskBlock(subBlock, workspaceId)
+            }
+        }
     }
 
-    private fun parseTaskBlock(block: String, workspaceId: String): Task {
+    /**
+     * Split a single block that may contain multiple tasks (multiple `# ` headers)
+     * into separate sub-blocks — one per task.
+     *
+     * If the block contains only one `# ` header (or none), it is returned as-is.
+     */
+    internal fun splitMultiTaskBlock(block: String): List<String> {
+        val lines = block.lines()
+        val titleIndices = lines.indices.filter { lines[it].startsWith("# ") && !lines[it].startsWith("## ") }
+
+        // 0 or 1 title → single task block
+        if (titleIndices.size <= 1) return listOf(block)
+
+        // Multiple titles → split at each `# ` boundary
+        val subBlocks = mutableListOf<String>()
+        for (i in titleIndices.indices) {
+            val start = titleIndices[i]
+            val end = if (i + 1 < titleIndices.size) titleIndices[i + 1] else lines.size
+            val subBlock = lines.subList(start, end).joinToString("\n").trim()
+            if (subBlock.isNotEmpty()) {
+                subBlocks.add(subBlock)
+            }
+        }
+        return subBlocks
+    }
+
+    internal fun parseTaskBlock(block: String, workspaceId: String): Task {
         val lines = block.lines()
 
-        val title = lines.firstOrNull { it.startsWith("# ") }
+        val title = lines.firstOrNull { it.startsWith("# ") && !it.startsWith("## ") }
             ?.removePrefix("# ")?.trim()
             ?: "Untitled Task"
 
-        val objective = extractSection(lines, "Objective")
-        val scope = extractListSection(lines, "Scope")
-        val acceptanceCriteria = extractListSection(lines, "Definition of Done")
-        val verificationCommands = extractListSection(lines, "Verification")
+        val objective = extractSectionWithAliases(lines, "Objective")
+        val scope = extractListSectionWithAliases(lines, "Scope")
+        val acceptanceCriteria = extractListSectionWithAliases(lines, "Definition of Done")
+        val verificationCommands = extractListSectionWithAliases(lines, "Verification")
 
         val now = Instant.now().toString()
         return Task(
@@ -74,6 +130,30 @@ object TaskParser {
             createdAt = now,
             updatedAt = now,
         )
+    }
+
+    /**
+     * Extract a text section, trying all known aliases for the given section name.
+     */
+    private fun extractSectionWithAliases(lines: List<String>, canonicalName: String): String {
+        val aliases = SECTION_ALIASES[canonicalName] ?: listOf(canonicalName)
+        for (alias in aliases) {
+            val result = extractSection(lines, alias)
+            if (result.isNotEmpty()) return result
+        }
+        return ""
+    }
+
+    /**
+     * Extract list items, trying all known aliases for the given section name.
+     */
+    private fun extractListSectionWithAliases(lines: List<String>, canonicalName: String): List<String> {
+        val aliases = SECTION_ALIASES[canonicalName] ?: listOf(canonicalName)
+        for (alias in aliases) {
+            val result = extractListSection(lines, alias)
+            if (result.isNotEmpty()) return result
+        }
+        return emptyList()
     }
 
     /**
