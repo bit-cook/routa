@@ -8,18 +8,27 @@ import java.io.File
 /**
  * LLM provider types supported by Routa, matching xiuper's config format.
  */
-@Serializable
 enum class LLMProviderType(val displayName: String) {
-    OPENAI("openai"),
-    ANTHROPIC("anthropic"),
-    GOOGLE("google"),
-    DEEPSEEK("deepseek"),
-    OLLAMA("ollama"),
-    OPENROUTER("openrouter");
+    OPENAI("OpenAI"),
+    ANTHROPIC("Anthropic"),
+    GOOGLE("Google"),
+    DEEPSEEK("DeepSeek"),
+    OLLAMA("Ollama"),
+    OPENROUTER("OpenRouter"),
+    GLM("GLM"),
+    QWEN("Qwen"),
+    KIMI("Kimi"),
+    GITHUB_COPILOT("GitHub Copilot"),
+    MINIMAX("MiniMax"),
+    CUSTOM_OPENAI_BASE("custom-openai-base");
 
     companion object {
+        fun fromDisplayName(name: String): LLMProviderType? {
+            return entries.find { it.displayName == name }
+        }
+
         fun fromString(name: String): LLMProviderType? {
-            return entries.find { it.displayName.equals(name, ignoreCase = true) || it.name.equals(name, ignoreCase = true) }
+            return entries.find { it.displayName.equals(name, ignoreCase = true) }
         }
     }
 }

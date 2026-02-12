@@ -18,8 +18,10 @@ import com.phodal.routa.core.provider.CapabilityBasedRouter
 import com.phodal.routa.core.provider.KoogAgentProvider
 import com.phodal.routa.core.provider.ResilientAgentProvider
 import com.phodal.routa.core.provider.StreamChunk
+import com.phodal.routa.core.provider.WorkspaceAgentProvider
 import com.phodal.routa.core.runner.OrchestratorPhase
 import com.phodal.routa.core.runner.OrchestratorResult
+import com.phodal.routa.core.viewmodel.AgentMode
 import com.phodal.routa.core.viewmodel.CrafterStreamState
 import com.phodal.routa.core.viewmodel.RoutaViewModel
 import kotlinx.coroutines.*
@@ -96,9 +98,13 @@ class IdeaRoutaService(private val project: Project) : Disposable {
     private val _useAcpForRouta = MutableStateFlow(true)
     val useAcpForRouta: StateFlow<Boolean> = _useAcpForRouta.asStateFlow()
 
-    /** The active LLM model config for ROUTA/GATE (KoogAgent). */
+    /** The active LLM model config for ROUTA/GATE (KoogAgent) or Workspace Agent. */
     private val _llmModelConfig = MutableStateFlow<NamedModelConfig?>(null)
     val llmModelConfig: StateFlow<NamedModelConfig?> = _llmModelConfig.asStateFlow()
+
+    /** Current agent execution mode (ACP_AGENT or WORKSPACE). */
+    private val _agentMode = MutableStateFlow(AgentMode.ACP_AGENT)
+    val agentMode: StateFlow<AgentMode> = _agentMode.asStateFlow()
 
     private val _mcpServerUrl = MutableStateFlow<String?>(null)
     /** The MCP server SSE URL exposed to Claude Code, if running. */
@@ -131,10 +137,19 @@ class IdeaRoutaService(private val project: Project) : Disposable {
     }
 
     /**
-     * Set the LLM model config for ROUTA/GATE.
+     * Set the LLM model config for ROUTA/GATE or Workspace Agent.
      */
     fun setLlmModelConfig(config: NamedModelConfig) {
         _llmModelConfig.value = config
+    }
+
+    /**
+     * Set the agent execution mode.
+     *
+     * @param mode [AgentMode.ACP_AGENT] for multi-agent pipeline, [AgentMode.WORKSPACE] for single agent.
+     */
+    fun setAgentMode(mode: AgentMode) {
+        _agentMode.value = mode
     }
 
     // ── Public API (Orchestration) ──────────────────────────────────────
@@ -252,6 +267,51 @@ class IdeaRoutaService(private val project: Project) : Disposable {
 
         // Pre-connect a crafter session to start MCP server for coordination tools
         preConnectMcpSession(crafterAgent)
+    }
+
+    /**
+     * Initialize the Routa system in Workspace Agent mode.
+     *
+     * Creates a [WorkspaceAgentProvider] that combines planning AND implementation
+     * in a single agent with file tools and agent coordination tools.
+     *
+     * The workspace agent uses the specified [NamedModelConfig] for LLM calls
+     * (or falls back to the active config from ~/.autodev/config.yaml).
+     *
+     * @param modelConfig Optional explicit LLM model config.
+     */
+    fun initializeWorkspace(modelConfig: NamedModelConfig? = null) {
+        // Clean up previous session
+        reset()
+
+        val workspaceId = project.basePath ?: "default-workspace"
+        val cwd = project.basePath ?: "."
+        val config = modelConfig ?: _llmModelConfig.value ?: RoutaConfigLoader.getActiveModelConfig()
+
+        if (config != null) {
+            _llmModelConfig.value = config
+        }
+
+        // Create a shared RoutaSystem
+        val system = RoutaFactory.createInMemory(scope)
+
+        // Create the WorkspaceAgentProvider
+        val workspaceProvider = WorkspaceAgentProvider(
+            agentTools = system.tools,
+            workspaceId = workspaceId,
+            cwd = cwd,
+            modelConfig = config,
+        )
+
+        _agentMode.value = AgentMode.WORKSPACE
+
+        // Configure and initialize the ViewModel in WORKSPACE mode
+        viewModel.useEnhancedRoutaPrompt = false
+        viewModel.agentMode = AgentMode.WORKSPACE
+        viewModel.initialize(workspaceProvider, workspaceId, system)
+
+        val configInfo = if (config != null) "${config.provider}/${config.model}" else "default"
+        log.info("IdeaRoutaService initialized in WORKSPACE mode: model=$configInfo, cwd=$cwd")
     }
 
     /**

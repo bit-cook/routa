@@ -52,6 +52,13 @@ dependencies {
     }
     implementation(libs.kotlinx.io.core)
 
+    // Ktor HTTP client (for LLM client providers)
+    implementation(libs.ktor.client.core)
+    implementation(libs.ktor.client.cio)
+
+    // DateTime (for token expiration)
+    implementation(libs.kotlinx.datetime)
+
     // YAML config reading
     implementation(libs.kaml)
 

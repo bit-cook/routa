@@ -17,6 +17,7 @@ import com.phodal.routa.core.coordinator.CoordinationPhase
 import com.phodal.routa.core.model.AgentStatus
 import com.phodal.routa.core.runner.OrchestratorPhase
 import com.phodal.routa.core.runner.OrchestratorResult
+import com.phodal.routa.core.viewmodel.AgentMode
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import java.awt.*
@@ -95,6 +96,16 @@ class DispatcherPanel(
         font = font.deriveFont(11f)
         toolTipText = "Select agent model"
     }
+
+    /** Mode selector: ACP Agent (multi-agent) or Workspace Agent (single agent). */
+    private val modeCombo = JComboBox(arrayOf("ACP Agent", "Workspace Agent")).apply {
+        preferredSize = Dimension(130, 24)
+        font = font.deriveFont(11f)
+        toolTipText = "Switch between multi-agent (ACP) and single-agent (Workspace) mode"
+    }
+
+    /** Tracks whether we're currently in workspace mode (to avoid re-entrant updates). */
+    private var currentMode: AgentMode = AgentMode.ACP_AGENT
 
     /** CardLayout area that swaps the displayed renderer scroll pane. */
     private val rendererCardPanel = JPanel(CardLayout()).apply {
@@ -226,6 +237,16 @@ class DispatcherPanel(
             val selected = modelCombo.selectedItem as? String ?: return@addActionListener
             handleModelChange(selected)
         }
+
+        // ── Wire mode combo ─────────────────────────────────────────────
+        modeCombo.addActionListener {
+            val selectedIndex = modeCombo.selectedIndex
+            val newMode = if (selectedIndex == 0) AgentMode.ACP_AGENT else AgentMode.WORKSPACE
+            if (newMode != currentMode) {
+                currentMode = newMode
+                handleModeSwitch(newMode)
+            }
+        }
     }
 
     private fun createTitleBar(): JPanel {
@@ -278,18 +299,29 @@ class DispatcherPanel(
             )
         }
 
-        // Top row: Agent selector
+        // Top row: Agent selector (left) + Mode switcher (right)
         val settingsIcon = JBLabel(AllIcons.General.Settings).apply {
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
             toolTipText = "Select Agent"
             border = JBUI.Borders.empty(0, 8, 0, 4)
         }
 
-        val agentRow = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
+        val agentSelectorPart = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
             isOpaque = false
-            border = JBUI.Borders.empty(6, 4, 2, 4)
             add(settingsIcon)
             add(agentLabel)
+        }
+
+        val modeSelectorPart = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply {
+            isOpaque = false
+            add(modeCombo)
+        }
+
+        val agentRow = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            border = JBUI.Borders.empty(6, 4, 2, 4)
+            add(agentSelectorPart, BorderLayout.WEST)
+            add(modeSelectorPart, BorderLayout.EAST)
         }
 
         val showAgentPopup = { e: MouseEvent ->
@@ -479,28 +511,114 @@ class DispatcherPanel(
         }
     }
 
-    // ── Model Change Handling ────────────────────────────────────────────
+    // ── Mode Switch Handling ─────────────────────────────────────────────
 
-    private fun handleModelChange(modelName: String) {
-        routaService.crafterModelKey.value = modelName
+    /**
+     * Handle switching between ACP Agent and Workspace Agent modes.
+     *
+     * - **Title bar `modelCombo`**: Always shows crafter ACP agent keys (untouched by mode switch).
+     * - **Input area `agentLabel` + `agentPopup`**: Changes based on mode:
+     *   - ACP Agent: shows ACP agent keys
+     *   - Workspace Agent: shows LLM model configs from `~/.autodev/config.yaml`
+     */
+    private fun handleModeSwitch(mode: AgentMode) {
+        log.info("Switching agent mode to: $mode")
+        routaService.setAgentMode(mode)
 
-        if (routaService.useAcpForRouta.value) {
-            routaService.routaModelKey.value = modelName
-            log.info("Agent model changed to: $modelName")
-        } else {
-            val configs = routaService.getAvailableLlmConfigs()
-            val selected = configs.find { it.name == modelName }
-            if (selected != null) {
-                routaService.setLlmModelConfig(selected)
-                log.info("LLM model changed to: ${selected.provider}/${selected.model}")
+        // Clear panels for fresh start
+        clearAllPanels()
+
+        when (mode) {
+            AgentMode.ACP_AGENT -> {
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        val config = configService.loadConfig()
+                        val agentKeys = config.agents.keys.toList()
+
+                        withContext(Dispatchers.EDT) {
+                            // Update input-area agent popup with ACP agent keys
+                            val defaultAgent = agentKeys.firstOrNull { it.equals("claude", ignoreCase = true) }
+                                ?: config.activeAgent?.takeIf { agentKeys.contains(it) }
+                                ?: agentKeys.firstOrNull()
+
+                            updateAgentPopupForAcp(agentKeys, defaultAgent)
+
+                            if (defaultAgent != null) {
+                                routaService.initialize(
+                                    crafterAgent = defaultAgent,
+                                    routaAgent = defaultAgent,
+                                    gateAgent = defaultAgent,
+                                )
+
+                                routaPanel.appendChunk(
+                                    com.phodal.routa.core.provider.StreamChunk.Text(
+                                        "✓ Switched to ACP Agent mode. Agent: $defaultAgent"
+                                    )
+                                )
+                            }
+
+                            hintLabel.text = "Routa DAG: Plan → Execute → Verify"
+                        }
+                    } catch (e: Exception) {
+                        log.warn("Failed to switch to ACP mode: ${e.message}", e)
+                    }
+                }
+            }
+
+            AgentMode.WORKSPACE -> {
+                // Update input-area agent popup with LLM model configs
+                val llmConfigs = routaService.getAvailableLlmConfigs()
+                val activeConfig = routaService.getActiveLlmConfig() ?: llmConfigs.firstOrNull()
+
+                updateAgentPopupForWorkspace(llmConfigs, activeConfig)
+
+                // Initialize workspace provider
+                if (activeConfig != null) {
+                    routaService.setLlmModelConfig(activeConfig)
+                    routaService.initializeWorkspace(activeConfig)
+
+                    val modelLabel = activeConfig.name.ifBlank { "${activeConfig.provider}/${activeConfig.model}" }
+                    routaPanel.appendChunk(
+                        com.phodal.routa.core.provider.StreamChunk.Text(
+                            "✓ Switched to Workspace Agent mode. Model: $modelLabel"
+                        )
+                    )
+                } else {
+                    routaPanel.appendChunk(
+                        com.phodal.routa.core.provider.StreamChunk.Text(
+                            "⚠️ No LLM config found. Please configure ~/.autodev/config.yaml"
+                        )
+                    )
+                }
+
+                hintLabel.text = "Workspace Agent: Plan + Implement (single agent)"
             }
         }
     }
 
+    // ── Model Change Handling ────────────────────────────────────────────
+
     /**
-     * Update the agent popup menu with available agents.
+     * Handle changes from the title bar `modelCombo`.
+     * This combo always represents crafter agent selection, regardless of mode.
      */
-    private fun updateAgentPopup(agents: List<String>, selectedAgent: String?) {
+    private fun handleModelChange(modelName: String) {
+        // Title bar modelCombo is always for crafter agent
+        routaService.crafterModelKey.value = modelName
+
+        if (routaService.useAcpForRouta.value) {
+            routaService.routaModelKey.value = modelName
+        }
+        log.info("Crafter agent model changed to: $modelName")
+    }
+
+    // ── Agent Popup for ACP Mode ─────────────────────────────────────────
+
+    /**
+     * Update the input-area agent popup with ACP agent keys.
+     * Selecting an item updates both `agentLabel` and `modelCombo` (crafter).
+     */
+    private fun updateAgentPopupForAcp(agents: List<String>, selectedAgent: String?) {
         agentPopup.removeAll()
 
         for (agent in agents) {
@@ -508,8 +626,15 @@ class DispatcherPanel(
                 background = JBColor(0x161B22, 0x161B22)
                 foreground = JBColor(0xC9D1D9, 0xC9D1D9)
                 addActionListener {
-                    modelCombo.selectedItem = agent
                     agentLabel.text = agent
+                    modelCombo.selectedItem = agent
+
+                    // Re-initialize with new agent
+                    routaService.initialize(
+                        crafterAgent = agent,
+                        routaAgent = agent,
+                        gateAgent = agent,
+                    )
                 }
             }
             agentPopup.add(menuItem)
@@ -522,39 +647,62 @@ class DispatcherPanel(
         }
     }
 
+    // ── Agent Popup for Workspace Mode ───────────────────────────────────
+
+    /**
+     * Update the input-area agent popup with LLM model configs.
+     * Selecting an item updates `agentLabel` and re-initializes the workspace provider.
+     */
+    private fun updateAgentPopupForWorkspace(
+        configs: List<com.phodal.routa.core.config.NamedModelConfig>,
+        activeConfig: com.phodal.routa.core.config.NamedModelConfig?,
+    ) {
+        agentPopup.removeAll()
+
+        for (config in configs) {
+            val label = config.name.ifBlank { "${config.provider}/${config.model}" }
+            val menuItem = JMenuItem(label).apply {
+                background = JBColor(0x161B22, 0x161B22)
+                foreground = JBColor(0xC9D1D9, 0xC9D1D9)
+                addActionListener {
+                    agentLabel.text = label
+                    routaService.setLlmModelConfig(config)
+                    routaService.initializeWorkspace(config)
+                    log.info("Workspace model switched to: ${config.provider}/${config.model}")
+                }
+            }
+            agentPopup.add(menuItem)
+        }
+
+        if (activeConfig != null) {
+            agentLabel.text = activeConfig.name.ifBlank { "${activeConfig.provider}/${activeConfig.model}" }
+        } else if (configs.isNotEmpty()) {
+            val first = configs.first()
+            agentLabel.text = first.name.ifBlank { "${first.provider}/${first.model}" }
+        } else {
+            agentLabel.text = "No models"
+        }
+    }
+
     // ── Agent Loading ───────────────────────────────────────────────────
 
     private fun loadAgents() {
         scope.launch(Dispatchers.IO) {
             try {
-                log.info("Loading ACP agents...")
+                log.info("Loading agents (mode: $currentMode)...")
                 configService.reloadConfig()
                 val config = configService.loadConfig()
                 val agentKeys = config.agents.keys.toList()
 
-                val useAcpForRouta = routaService.useAcpForRouta.value
-
                 withContext(Dispatchers.EDT) {
-                    if (agentKeys.isEmpty()) {
-                        val msg = "No ACP agents detected. Configure agents in ~/.acp-manager/config.yaml"
-                        log.warn(msg)
-                        routaPanel.appendChunk(
-                            com.phodal.routa.core.provider.StreamChunk.Text("⚠️ $msg")
-                        )
-                        return@withContext
-                    }
+                    // Set mode combo to current mode
+                    modeCombo.selectedIndex = if (currentMode == AgentMode.ACP_AGENT) 0 else 1
 
-                    // Populate model combo
+                    // ── Title bar modelCombo: Always show ACP agent keys ──
                     modelCombo.removeAllItems()
-                    if (useAcpForRouta) {
-                        agentKeys.forEach { modelCombo.addItem(it) }
-                    } else {
-                        val llmConfigs = routaService.getAvailableLlmConfigs()
-                        val modelNames = llmConfigs.map { it.name.ifBlank { "${it.provider}/${it.model}" } }
-                        modelNames.forEach { modelCombo.addItem(it) }
-                    }
+                    agentKeys.forEach { modelCombo.addItem(it) }
 
-                    // Prefer "claude" as default agent
+                    // Prefer "claude" as default crafter
                     val defaultAgent = when {
                         agentKeys.any { it.equals("claude", ignoreCase = true) } ->
                             agentKeys.first { it.equals("claude", ignoreCase = true) }
@@ -562,34 +710,67 @@ class DispatcherPanel(
                             config.activeAgent
                         else -> agentKeys.firstOrNull()
                     }
-
                     if (defaultAgent != null) {
                         modelCombo.selectedItem = defaultAgent
-
-                        updateAgentPopup(agentKeys, defaultAgent)
-
-                        val routaMode = if (useAcpForRouta) "ACP Agent ($defaultAgent)" else "KoogAgent"
-                        log.info("Initializing Routa service: CRAFTER=$defaultAgent, ROUTA=$routaMode")
-                        routaService.initialize(
-                            crafterAgent = defaultAgent,
-                            routaAgent = defaultAgent,
-                            gateAgent = defaultAgent,
-                        )
-
-                        routaPanel.appendChunk(
-                            com.phodal.routa.core.provider.StreamChunk.Text(
-                                "✓ Ready. Agent: $defaultAgent | Mode: $routaMode"
-                            )
-                        )
-                    } else {
-                        log.warn("No default agent found")
-                        routaPanel.appendChunk(
-                            com.phodal.routa.core.provider.StreamChunk.Text("⚠️ No default agent configured")
-                        )
-                        updateAgentPopup(agentKeys, null)
                     }
 
-                    log.info("Dispatcher ready. ${agentKeys.size} ACP agent(s): ${agentKeys.joinToString(", ")}")
+                    // ── Input area agentPopup: Depends on mode ──
+                    if (currentMode == AgentMode.ACP_AGENT) {
+                        if (agentKeys.isEmpty()) {
+                            val msg = "No ACP agents detected. Configure agents in ~/.acp-manager/config.yaml"
+                            log.warn(msg)
+                            routaPanel.appendChunk(
+                                com.phodal.routa.core.provider.StreamChunk.Text("⚠️ $msg")
+                            )
+                            return@withContext
+                        }
+
+                        updateAgentPopupForAcp(agentKeys, defaultAgent)
+
+                        if (defaultAgent != null) {
+                            log.info("Initializing Routa service: CRAFTER=$defaultAgent")
+                            routaService.initialize(
+                                crafterAgent = defaultAgent,
+                                routaAgent = defaultAgent,
+                                gateAgent = defaultAgent,
+                            )
+
+                            routaPanel.appendChunk(
+                                com.phodal.routa.core.provider.StreamChunk.Text(
+                                    "✓ Ready. Agent: $defaultAgent | Mode: ACP Agent"
+                                )
+                            )
+                        } else {
+                            log.warn("No default agent found")
+                            routaPanel.appendChunk(
+                                com.phodal.routa.core.provider.StreamChunk.Text("⚠️ No default agent configured")
+                            )
+                        }
+
+                        hintLabel.text = "Routa DAG: Plan → Execute → Verify"
+                        log.info("Dispatcher ready. ${agentKeys.size} ACP agent(s): ${agentKeys.joinToString(", ")}")
+                    } else {
+                        // ── Workspace Agent mode ──
+                        val llmConfigs = routaService.getAvailableLlmConfigs()
+                        val activeConfig = routaService.getActiveLlmConfig() ?: llmConfigs.firstOrNull()
+
+                        updateAgentPopupForWorkspace(llmConfigs, activeConfig)
+
+                        if (activeConfig != null) {
+                            routaService.setLlmModelConfig(activeConfig)
+                            routaService.initializeWorkspace(activeConfig)
+
+                            val label = activeConfig.name.ifBlank { "${activeConfig.provider}/${activeConfig.model}" }
+                            routaPanel.appendChunk(
+                                com.phodal.routa.core.provider.StreamChunk.Text(
+                                    "✓ Ready. Model: $label | Mode: Workspace Agent"
+                                )
+                            )
+                        }
+
+                        hintLabel.text = "Workspace Agent: Plan + Implement (single agent)"
+                        log.info("Dispatcher ready in Workspace Agent mode. ${llmConfigs.size} LLM config(s) available.")
+                    }
                 }
             } catch (e: Exception) {
                 log.warn("Failed to load agents: ${e.message}", e)
