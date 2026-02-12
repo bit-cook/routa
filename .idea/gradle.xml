@@ -9,7 +9,11 @@
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$" />
+            <option value="$PROJECT_DIR$/examples" />
+            <option value="$PROJECT_DIR$/examples/agent-hub-a2a-example" />
+            <option value="$PROJECT_DIR$/routa-agent-hub" />
             <option value="$PROJECT_DIR$/routa-core" />
+            <option value="$PROJECT_DIR$/routa-gui" />
           </set>
         </option>
       </GradleProjectSettings>
