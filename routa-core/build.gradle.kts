@@ -19,6 +19,13 @@ tasks.named<JavaExec>("run") {
     standardInput = System.`in`
 }
 
+// Task to run the Workspace Agent CLI (text-based tool calling)
+tasks.register<JavaExec>("runWorkspaceAgent") {
+    mainClass.set("com.phodal.routa.core.cli.WorkspaceAgentCliKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    standardInput = System.`in`
+}
+
 repositories {
     mavenCentral()
 }

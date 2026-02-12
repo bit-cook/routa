@@ -3,69 +3,73 @@ package com.phodal.routa.core.provider
 import ai.koog.prompt.dsl.prompt
 import ai.koog.prompt.streaming.StreamFrame
 import com.phodal.routa.core.config.NamedModelConfig
-import com.phodal.routa.core.koog.WorkspaceToolRegistry
 import com.phodal.routa.core.model.AgentRole
 import com.phodal.routa.core.tool.AgentTools
-import com.phodal.routa.core.config.LLMProviderType
 import com.phodal.routa.core.config.RoutaConfigLoader
-import ai.koog.agents.core.agent.AIAgent
-import ai.koog.prompt.executor.clients.deepseek.DeepSeekLLMClient
 import ai.koog.prompt.executor.llms.SingleLLMPromptExecutor
-import ai.koog.prompt.executor.llms.all.*
-import ai.koog.prompt.llm.LLMCapability
-import ai.koog.prompt.llm.LLMProvider
 import ai.koog.prompt.llm.LLModel
+import ai.koog.prompt.message.Message
 import com.phodal.routa.core.koog.RoutaAgentFactory
+import com.phodal.routa.core.koog.TextBasedToolExecutor
+import com.phodal.routa.core.koog.ToolCallExtractor
 import kotlinx.coroutines.flow.cancellable
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Workspace Agent provider — a single agent that can both plan AND implement.
+ * Workspace Agent provider — uses **text-based tool calling** (not native function calling).
  *
- * Inspired by Intent by Augment's workspace agent architecture:
- * - Has full agent coordination tools (create_agent, delegate, list_agents, etc.)
- * - Has workspace file operation tools (read_file, write_file, list_files)
- * - Uses a workspace-oriented system prompt
+ * Instead of passing tool definitions to the LLM as function-calling parameters
+ * (which many models handle poorly), this provider:
  *
- * Unlike [KoogAgentProvider] which is designed only for planning (ROUTA role)
- * and delegates implementation to CRAFTERs, the WorkspaceAgentProvider acts as
- * a self-sufficient agent that can directly read/write files while also being
- * able to coordinate with other agents via MCP-based AgentTools.
+ * 1. Embeds tool descriptions directly in the system prompt
+ * 2. Instructs the LLM to emit tool calls as `<tool_call>` XML blocks
+ * 3. Parses tool calls from the LLM's text response using [ToolCallExtractor]
+ * 4. Executes tool calls using [TextBasedToolExecutor]
+ * 5. Feeds results back as `<tool_result>` blocks in a follow-up user message
+ * 6. Loops until the LLM stops emitting tool calls or max iterations is reached
  *
- * ## Key Differences from KoogAgentProvider
+ * This approach is inspired by Intent by Augment's `agent-tool-executor.ts` and
+ * `tool-call-extractor.ts`, where tool calls are extracted from text rather than
+ * relying on the LLM provider's native tool/function-calling API.
  *
- * | Feature              | KoogAgentProvider      | WorkspaceAgentProvider |
- * |----------------------|------------------------|------------------------|
- * | File editing         | No                     | Yes (read/write/list)  |
- * | Agent coordination   | Yes                    | Yes                    |
- * | System prompt        | Role-based (ROUTA/etc) | Workspace-focused      |
- * | Max iterations       | 5-10                   | 20                     |
- * | Use case             | Multi-agent pipeline   | Single-agent workspace |
+ * ## Why Text-Based Tool Calling?
  *
- * ## Usage
+ * - **Better compatibility**: Works with any LLM, including those with poor
+ *   function-calling support (many open-source models)
+ * - **More reliable**: The LLM can see and reason about tool calls in context
+ * - **Simpler debugging**: Tool calls are visible in the conversation text
+ * - **Flexible parsing**: Supports XML, JSON, and markdown code block formats
  *
- * ```kotlin
- * val provider = WorkspaceAgentProvider(
- *     agentTools = routa.tools,
- *     workspaceId = "my-workspace",
- *     cwd = "/path/to/project",
- * )
+ * ## Tool Call Format
  *
- * // As a standalone workspace agent
- * val result = provider.run(AgentRole.ROUTA, agentId, "Add user authentication")
- *
- * // Or with streaming
- * provider.runStreaming(AgentRole.ROUTA, agentId, prompt) { chunk -> ... }
+ * The LLM generates tool calls in XML format:
+ * ```xml
+ * <tool_call>
+ * {"name": "read_file", "arguments": {"path": "src/main.kt"}}
+ * </tool_call>
  * ```
  *
- * @see KoogAgentProvider for the planning-only provider
- * @see AgentTools for the MCP-based agent coordination tools
+ * Results are fed back as:
+ * ```xml
+ * <tool_result>
+ * <tool_name>read_file</tool_name>
+ * <status>success</status>
+ * <output>
+ * ... file contents ...
+ * </output>
+ * </tool_result>
+ * ```
+ *
+ * @see ToolCallExtractor for parsing tool calls from text
+ * @see TextBasedToolExecutor for executing parsed tool calls
+ * @see KoogAgentProvider for the native function-calling approach
  */
 class WorkspaceAgentProvider(
     private val agentTools: AgentTools,
     private val workspaceId: String,
     private val cwd: String,
     private val modelConfig: NamedModelConfig? = null,
+    private val maxIterations: Int = 20,
 ) : AgentProvider {
 
     // Track active agents for isHealthy / interrupt
@@ -80,107 +84,177 @@ class WorkspaceAgentProvider(
 
     companion object {
         /**
-         * Workspace agent system prompt, adapted from Intent's workspace.ts.
+         * Build the workspace agent system prompt with tool descriptions embedded.
          *
-         * Combines workspace management capabilities with agent coordination.
-         * The agent can directly edit files AND coordinate with other agents.
+         * This prompt teaches the LLM to use `<tool_call>` XML format for invoking
+         * tools, instead of relying on native function-calling parameters.
          */
-        val WORKSPACE_SYSTEM_PROMPT = """
-            |# Workspace Agent
+        fun buildSystemPrompt(cwd: String): String = """
+            |You are a workspace agent that can directly implement tasks and manage files.
+            |You have access to tools for reading, writing, and listing files in the project.
             |
-            |You are a workspace agent that can directly implement tasks, manage files, 
-            |and coordinate with other agents. You have both file editing capabilities 
-            |and agent coordination tools.
+            |## Working Directory
             |
-            |## Workspace
+            |Your workspace root is: $cwd
+            |All file paths are relative to this directory.
             |
-            |A workspace is a project environment with context and agents. You can directly 
-            |read, write, and list files in the project directory. You can also create and 
-            |coordinate other agents for parallel work.
+            |## Available Tools
             |
-            |## Creating Tasks
+            |You have the following tools available. To use a tool, emit a `<tool_call>` block
+            |with a JSON object containing `name` and `arguments`:
             |
-            |Use `@@@task` blocks to propose tasks. One task per block:
+            |### read_file
+            |Read the contents of a file.
             |
-            |```
-            |@@@task
-            |# Task Title
+            |Parameters:
+            |- `path` (required): File path relative to workspace root
             |
-            |## Objective
-            |Clear statement of what needs to be done.
+            |Example:
+            |<tool_call>
+            |{"name": "read_file", "arguments": {"path": "src/main.kt"}}
+            |</tool_call>
             |
-            |## Scope
-            |- Specific files/components to modify
+            |### write_file
+            |Write content to a file. Creates parent directories automatically.
             |
-            |## Definition of Done
-            |- Acceptance criteria
+            |Parameters:
+            |- `path` (required): File path relative to workspace root
+            |- `content` (required): The full content to write to the file
             |
-            |## Verification
-            |- Commands to run for verification
-            |@@@
-            |```
+            |Example:
+            |<tool_call>
+            |{"name": "write_file", "arguments": {"path": "src/hello.kt", "content": "fun main() {\n    println(\"Hello\")\n}"}}
+            |</tool_call>
             |
-            |## File Operations
+            |### list_files
+            |List files and directories in a path.
             |
-            |You can directly work with project files:
-            |- `read_file(path)` — Read the contents of a project file (relative path)
-            |- `write_file(path, content)` — Write/create a file in the project
-            |- `list_files(path)` — List files and directories
+            |Parameters:
+            |- `path` (optional, defaults to "."): Directory path relative to workspace root
             |
-            |IMPORTANT: Always read existing files before modifying them to understand 
-            |the current state. Make minimal, targeted changes.
+            |Example:
+            |<tool_call>
+            |{"name": "list_files", "arguments": {"path": "src"}}
+            |</tool_call>
             |
-            |## Agent Collaboration
+            |## Tool Call Rules
             |
-            |You can coordinate with other agents:
-            |- `list_agents()` — List all agents and their status
-            |- `create_agent(name, role, workspaceId)` — Create a new agent (CRAFTER, GATE)
-            |- `delegate_task(agentId, taskId, callerAgentId)` — Delegate a task to an agent
-            |- `send_message_to_agent(fromAgentId, toAgentId, message)` — Message another agent
-            |- `read_agent_conversation(agentId)` — Read another agent's chat history
-            |- `report_to_parent(agentId, taskId, summary, success)` — Report completion
-            |- `get_agent_status(agentId)` — Check agent status
-            |- `get_agent_summary(agentId)` — Get agent summary
+            |1. **One tool call per block**: Each `<tool_call>` block should contain exactly one tool invocation.
+            |2. **Multiple calls allowed**: You can include multiple `<tool_call>` blocks in a single response.
+            |3. **Wait for results**: After emitting tool calls, I will execute them and return the results
+            |   in `<tool_result>` blocks. Use these results to continue your work.
+            |4. **Read before write**: Always read a file before modifying it to understand its current state.
+            |5. **JSON format**: The content inside `<tool_call>` must be valid JSON with `name` and `arguments` fields.
             |
             |## Workflow
             |
-            |1. **Analyze** — Understand the user request, read relevant files
-            |2. **Plan** — Break down into tasks if complex, or implement directly if simple
-            |3. **Implement** — Read files, make changes, write files
-            |4. **Verify** — Check that changes are correct and complete
-            |5. **Report** — Summarize what was done
+            |1. **Understand** the request — ask clarifying questions if needed
+            |2. **Explore** — use `list_files` and `read_file` to understand the codebase
+            |3. **Plan** — describe what changes you'll make
+            |4. **Implement** — use `read_file` then `write_file` to make changes
+            |5. **Verify** — read back modified files to confirm correctness
+            |6. **Summarize** — explain what was done
             |
-            |## Hard Rules
+            |## Important Notes
             |
-            |1. **Read before write** — Always read a file before modifying it
-            |2. **Minimal changes** — Make the smallest change that solves the problem
-            |3. **No scope creep** — Stick to what was asked
-            |4. **Coordinate** — If other agents are active, check their work first
-            |5. **Report completion** — When done, use `report_to_parent` to report results
+            |- When you're done and have no more tool calls to make, just provide your final summary.
+            |- Make minimal, targeted changes — don't rewrite entire files unnecessarily.
+            |- If a task is too complex, break it down into steps and work through them one at a time.
+            |- Always provide your reasoning before making tool calls.
         """.trimMargin()
     }
 
-    // ── AgentRunner ──────────────────────────────────────────────────────
+    // ── AgentProvider: Run (with tool call loop) ────────────────────────
 
     override suspend fun run(role: AgentRole, agentId: String, prompt: String): String {
-        val agent = createWorkspaceAgent()
+        val components = createLLMComponents()
+        val toolExecutor = TextBasedToolExecutor(cwd)
 
         activeAgents[agentId] = RunningAgent(role)
 
         return try {
-            agent.run(prompt)
+            runAgentLoop(
+                executor = components.executor,
+                model = components.model,
+                systemPrompt = components.systemPrompt,
+                userPrompt = prompt,
+                toolExecutor = toolExecutor,
+                agentId = agentId,
+            )
         } catch (e: Exception) {
-            if (e.message?.contains("maxAgentIterations", ignoreCase = true) == true ||
-                e.message?.contains("number of steps", ignoreCase = true) == true
-            ) {
-                "[Agent reached max iterations. Partial output may be available.]"
-            } else {
-                throw e
-            }
+            "Error: ${e.message}"
         } finally {
-            agent.close()
             activeAgents.remove(agentId)
         }
+    }
+
+    /**
+     * The core agent loop:
+     * 1. Send prompt to LLM (without native tool definitions)
+     * 2. Check response for `<tool_call>` blocks
+     * 3. If found: execute tools, format results, add to conversation, repeat
+     * 4. If not found: return the final response
+     */
+    private suspend fun runAgentLoop(
+        executor: SingleLLMPromptExecutor,
+        model: LLModel,
+        systemPrompt: String,
+        userPrompt: String,
+        toolExecutor: TextBasedToolExecutor,
+        agentId: String,
+    ): String {
+        // Build conversation history as a list of messages
+        val conversationMessages = mutableListOf<Pair<String, String>>() // role -> content
+        conversationMessages.add("user" to userPrompt)
+
+        var lastResponse = ""
+
+        for (iteration in 1..maxIterations) {
+            // Check for cancellation
+            if (activeAgents[agentId]?.cancelled == true) {
+                return lastResponse.ifEmpty { "[Agent cancelled]" }
+            }
+
+            // Build prompt with full conversation history
+            val llmPrompt = prompt(id = "workspace-$agentId-iter$iteration") {
+                system(systemPrompt)
+                for ((role, content) in conversationMessages) {
+                    when (role) {
+                        "user" -> user(content)
+                        "assistant" -> assistant(content)
+                    }
+                }
+            }
+
+            // Execute LLM call WITHOUT tool definitions (text-based approach)
+            val responses = executor.execute(llmPrompt, model, tools = emptyList())
+            val responseText = responses
+                .filterIsInstance<Message.Response>()
+                .joinToString("") { it.content }
+
+            lastResponse = responseText
+
+            // Check for tool calls in the response
+            val toolCalls = ToolCallExtractor.extractToolCalls(responseText)
+
+            if (toolCalls.isEmpty()) {
+                // No tool calls — LLM is done, return the final response
+                return responseText
+            }
+
+            // Add assistant's response to conversation
+            conversationMessages.add("assistant" to responseText)
+
+            // Execute the tool calls
+            val results = toolExecutor.executeAll(toolCalls)
+            val resultMessage = toolExecutor.formatResults(results)
+
+            // Add tool results as a user message (the LLM will see these)
+            conversationMessages.add("user" to resultMessage)
+        }
+
+        // Max iterations reached
+        return lastResponse.ifEmpty { "[Agent reached max iterations ($maxIterations)]" }
     }
 
     // ── AgentProvider: Streaming ─────────────────────────────────────────
@@ -192,41 +266,125 @@ class WorkspaceAgentProvider(
         onChunk: (StreamChunk) -> Unit,
     ): String {
         val components = createLLMComponents()
-        activeAgents[agentId] = RunningAgent(role)
+        val toolExecutor = TextBasedToolExecutor(cwd)
 
-        val resultBuilder = StringBuilder()
+        activeAgents[agentId] = RunningAgent(role)
         onChunk(StreamChunk.Heartbeat())
 
         return try {
-            val llmPrompt = prompt(id = "workspace-$agentId") {
-                system(components.systemPrompt)
-                user(prompt)
+            runStreamingAgentLoop(
+                executor = components.executor,
+                model = components.model,
+                systemPrompt = components.systemPrompt,
+                userPrompt = prompt,
+                toolExecutor = toolExecutor,
+                agentId = agentId,
+                onChunk = onChunk,
+            )
+        } catch (e: Exception) {
+            onChunk(StreamChunk.Error(e.message ?: "Unknown error", recoverable = false))
+            "Error: ${e.message}"
+        } finally {
+            activeAgents.remove(agentId)
+        }
+    }
+
+    /**
+     * Streaming version of the agent loop.
+     *
+     * Streams text chunks to the caller while also extracting tool calls
+     * from the accumulated response.
+     */
+    private suspend fun runStreamingAgentLoop(
+        executor: SingleLLMPromptExecutor,
+        model: LLModel,
+        systemPrompt: String,
+        userPrompt: String,
+        toolExecutor: TextBasedToolExecutor,
+        agentId: String,
+        onChunk: (StreamChunk) -> Unit,
+    ): String {
+        val conversationMessages = mutableListOf<Pair<String, String>>()
+        conversationMessages.add("user" to userPrompt)
+
+        val fullOutput = StringBuilder()
+        var lastResponse = ""
+
+        for (iteration in 1..maxIterations) {
+            if (activeAgents[agentId]?.cancelled == true) {
+                return fullOutput.toString().ifEmpty { "[Agent cancelled]" }
             }
 
-            components.executor.executeStreaming(llmPrompt, components.model)
+            val llmPrompt = prompt(id = "workspace-$agentId-iter$iteration") {
+                system(systemPrompt)
+                for ((role, content) in conversationMessages) {
+                    when (role) {
+                        "user" -> user(content)
+                        "assistant" -> assistant(content)
+                    }
+                }
+            }
+
+            // Stream the LLM response
+            val responseBuilder = StringBuilder()
+            executor.executeStreaming(llmPrompt, model, tools = emptyList())
                 .cancellable()
                 .collect { frame ->
                     when (frame) {
                         is StreamFrame.Append -> {
-                            resultBuilder.append(frame.text)
+                            responseBuilder.append(frame.text)
                             onChunk(StreamChunk.Text(frame.text))
                         }
                         is StreamFrame.End -> {
-                            onChunk(StreamChunk.Completed(frame.finishReason ?: "end"))
+                            // Don't emit completed yet — we may have more iterations
                         }
                         is StreamFrame.ToolCall -> {
+                            // Native tool calls shouldn't happen (we passed empty tools)
+                            // but handle gracefully
                             onChunk(StreamChunk.ToolCall(frame.name, ToolCallStatus.IN_PROGRESS))
                         }
                     }
                 }
 
-            resultBuilder.toString()
-        } catch (e: Exception) {
-            onChunk(StreamChunk.Error(e.message ?: "Unknown error", recoverable = false))
-            throw e
-        } finally {
-            activeAgents.remove(agentId)
+            lastResponse = responseBuilder.toString()
+            fullOutput.append(lastResponse)
+
+            // Check for tool calls
+            val toolCalls = ToolCallExtractor.extractToolCalls(lastResponse)
+
+            if (toolCalls.isEmpty()) {
+                onChunk(StreamChunk.Completed("end"))
+                return fullOutput.toString()
+            }
+
+            // Notify about tool executions
+            for (tc in toolCalls) {
+                onChunk(StreamChunk.ToolCall(tc.name, ToolCallStatus.STARTED, tc.arguments.toString()))
+            }
+
+            // Add assistant response to conversation
+            conversationMessages.add("assistant" to lastResponse)
+
+            // Execute tools
+            val results = toolExecutor.executeAll(toolCalls)
+
+            // Notify completion of each tool
+            for (result in results) {
+                val status = if (result.success) ToolCallStatus.COMPLETED else ToolCallStatus.FAILED
+                onChunk(StreamChunk.ToolCall(result.toolName, status, result = result.output.take(200)))
+            }
+
+            // Format results and add to conversation
+            val resultMessage = toolExecutor.formatResults(results)
+            conversationMessages.add("user" to resultMessage)
+
+            // Add a visual separator in the stream
+            onChunk(StreamChunk.Text("\n\n"))
+            fullOutput.append("\n\n")
         }
+
+        onChunk(StreamChunk.Completed("max_iterations"))
+        return fullOutput.toString()
     }
 
     // ── AgentProvider: Health Check ──────────────────────────────────────
@@ -245,15 +403,15 @@ class WorkspaceAgentProvider(
     // ── AgentProvider: Capabilities ──────────────────────────────────────
 
     override fun capabilities(): ProviderCapabilities = ProviderCapabilities(
-        name = "Workspace Agent",
+        name = "Workspace Agent (Text-Based Tool Calling)",
         supportsStreaming = true,
-        supportsInterrupt = false,
-        supportsHealthCheck = false,
-        supportsFileEditing = true,   // Can edit files directly (unlike KoogAgentProvider)
+        supportsInterrupt = true,
+        supportsHealthCheck = true,
+        supportsFileEditing = true,
         supportsTerminal = false,
-        supportsToolCalling = true,   // Koog handles function calling natively
+        supportsToolCalling = true,
         maxConcurrentAgents = 5,
-        priority = 8,                 // Higher priority than Koog (5) for workspace tasks
+        priority = 8,
     )
 
     // ── AgentProvider: Cleanup ───────────────────────────────────────────
@@ -266,26 +424,7 @@ class WorkspaceAgentProvider(
         activeAgents.clear()
     }
 
-    // ── Internal: Agent & LLM creation ──────────────────────────────────
-
-    private fun createWorkspaceAgent(): AIAgent<String, String> {
-        val config = modelConfig ?: RoutaConfigLoader.getActiveModelConfig()
-            ?: throw IllegalStateException(
-                "No active model config found. Please configure ~/.autodev/config.yaml"
-            )
-
-        val executor = RoutaAgentFactory.createExecutor(config)
-        val model = RoutaAgentFactory.createModel(config)
-        val toolRegistry = WorkspaceToolRegistry.create(agentTools, workspaceId, cwd)
-
-        return AIAgent(
-            promptExecutor = executor,
-            llmModel = model,
-            systemPrompt = WORKSPACE_SYSTEM_PROMPT,
-            toolRegistry = toolRegistry,
-            maxIterations = 20,
-        )
-    }
+    // ── Internal: LLM creation ──────────────────────────────────────────
 
     private data class LLMComponents(
         val executor: SingleLLMPromptExecutor,
@@ -302,8 +441,7 @@ class WorkspaceAgentProvider(
         return LLMComponents(
             executor = RoutaAgentFactory.createExecutor(config),
             model = RoutaAgentFactory.createModel(config),
-            systemPrompt = WORKSPACE_SYSTEM_PROMPT,
+            systemPrompt = buildSystemPrompt(cwd),
         )
     }
-
 }
