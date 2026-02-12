@@ -178,6 +178,9 @@ class DispatcherPanel(
         agentPanels[routaPanel.agentId] = routaPanel
         agentPanels[gatePanel.agentId] = gatePanel
 
+        // Start MCP server immediately when panel opens (persists across mode switches)
+        routaService.ensureMcpServerRunning()
+
         setupUI()
         loadAgents()
         observeRoutaService()

@@ -8,10 +8,12 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.Project
 import com.phodal.routa.core.RoutaFactory
+import com.phodal.routa.core.RoutaSystem
 import com.phodal.routa.core.config.NamedModelConfig
 import com.phodal.routa.core.config.RoutaConfigLoader
 import com.phodal.routa.core.coordinator.CoordinationState
 import com.phodal.routa.core.event.AgentEvent
+import com.phodal.routa.core.mcp.RoutaMcpWebSocketServer
 import com.phodal.routa.core.model.AgentRole
 import com.phodal.routa.core.provider.AgentProvider
 import com.phodal.routa.core.provider.CapabilityBasedRouter
@@ -115,6 +117,12 @@ class IdeaRoutaService(private val project: Project) : Disposable {
     private var router: CapabilityBasedRouter? = null
     private var acpProvider: IdeaAcpAgentProvider? = null
 
+    /** Standalone MCP server for coordination tools (shared across modes). */
+    private var routaMcpServer: RoutaMcpWebSocketServer? = null
+
+    /** The shared RoutaSystem used by both MCP server and providers. */
+    private var sharedRoutaSystem: RoutaSystem? = null
+
     // ── Public API (LLM Config) ─────────────────────────────────────────
 
     /**
@@ -208,7 +216,7 @@ class IdeaRoutaService(private val project: Project) : Disposable {
         routaAgent: String = crafterAgent,
         gateAgent: String = crafterAgent,
     ) {
-        // Clean up previous session
+        // Clean up previous session (but keep MCP server running)
         reset()
 
         crafterModelKey.value = crafterAgent
@@ -217,8 +225,13 @@ class IdeaRoutaService(private val project: Project) : Disposable {
 
         val workspaceId = project.basePath ?: "default-workspace"
 
-        // Create a shared RoutaSystem for both provider and orchestrator
-        val system = RoutaFactory.createInMemory(scope)
+        // Use shared RoutaSystem (same as MCP server) or create new one
+        val system = sharedRoutaSystem ?: RoutaFactory.createInMemory(scope).also {
+            sharedRoutaSystem = it
+        }
+
+        // Ensure MCP server is running with the shared system
+        ensureMcpServerRunning(system)
 
         // Build capability-based router (like RoutaCli.buildProvider)
         val providers = mutableListOf<AgentProvider>()
@@ -281,7 +294,7 @@ class IdeaRoutaService(private val project: Project) : Disposable {
      * @param modelConfig Optional explicit LLM model config.
      */
     fun initializeWorkspace(modelConfig: NamedModelConfig? = null) {
-        // Clean up previous session
+        // Clean up previous session (but keep MCP server running)
         reset()
 
         val workspaceId = project.basePath ?: "default-workspace"
@@ -292,8 +305,13 @@ class IdeaRoutaService(private val project: Project) : Disposable {
             _llmModelConfig.value = config
         }
 
-        // Create a shared RoutaSystem
-        val system = RoutaFactory.createInMemory(scope)
+        // Use shared RoutaSystem (same as MCP server) or create new one
+        val system = sharedRoutaSystem ?: RoutaFactory.createInMemory(scope).also {
+            sharedRoutaSystem = it
+        }
+
+        // Ensure MCP server is running with the shared system
+        ensureMcpServerRunning(system)
 
         // Create the WorkspaceAgentProvider
         val workspaceProvider = WorkspaceAgentProvider(
@@ -324,12 +342,13 @@ class IdeaRoutaService(private val project: Project) : Disposable {
 
     /**
      * Reset the service, cleaning up all resources.
+     * Note: MCP server is NOT stopped here - it persists across mode switches.
      */
     fun reset() {
         viewModel.reset()
-        _mcpServerUrl.value = null
+        // Don't reset _mcpServerUrl - MCP server persists across mode switches
 
-        // Clean up IDE-specific resources
+        // Clean up IDE-specific resources (but not MCP server)
         disconnectMcpSession()
 
         scope.launch {
@@ -339,28 +358,62 @@ class IdeaRoutaService(private val project: Project) : Disposable {
         }
     }
 
-    // ── IDE-Specific: MCP Session Management ────────────────────────────
+    // ── IDE-Specific: MCP Server Management ──────────────────────────────
+
+    /**
+     * Ensure the MCP server is running. Call this when the DispatcherPanel opens.
+     * The MCP server persists across mode switches (ACP Agent ↔ Workspace Agent).
+     *
+     * @param system Optional RoutaSystem to use. If null, creates a new one.
+     */
+    fun ensureMcpServerRunning(system: RoutaSystem? = null) {
+        if (routaMcpServer?.isRunning == true) {
+            log.info("MCP server already running on port ${routaMcpServer!!.port}")
+            return
+        }
+
+        val workspaceId = project.basePath ?: "default-workspace"
+        val routaSystem = system ?: sharedRoutaSystem ?: RoutaFactory.createInMemory(scope).also {
+            sharedRoutaSystem = it
+        }
+
+        val mcpServer = RoutaMcpWebSocketServer(workspaceId = workspaceId, routa = routaSystem)
+        mcpServer.start()
+        routaMcpServer = mcpServer
+
+        val url = "http://127.0.0.1:${mcpServer.port}/mcp"
+        _mcpServerUrl.value = url
+        log.info("MCP server started at: $url (WebSocket) and http://127.0.0.1:${mcpServer.port}/sse (SSE)")
+    }
+
+    /**
+     * Stop the MCP server. Called only on dispose.
+     */
+    private fun stopMcpServer() {
+        routaMcpServer?.stop()
+        routaMcpServer = null
+        sharedRoutaSystem = null
+        _mcpServerUrl.value = null
+        log.info("MCP server stopped")
+    }
+
+    // ── IDE-Specific: ACP Session Management ─────────────────────────────
 
     private fun preConnectMcpSession(crafterAgent: String) {
+        // MCP server is now managed independently via ensureMcpServerRunning()
+        // This method is kept for backward compatibility with ACP session pre-connection
         scope.launch {
             try {
                 val configService = AcpConfigService.getInstance(project)
                 val crafterConfig = configService.getAgentConfig(crafterAgent)
                 if (crafterConfig != null) {
-                    log.info("Pre-connecting crafter session to start MCP server...")
+                    log.info("Pre-connecting crafter session...")
                     val sessionManager = AcpSessionManager.getInstance(project)
                     val sessionKey = "routa-mcp-crafter"
                     val session = sessionManager.getOrCreateSession(sessionKey)
                     if (!session.isConnected) {
                         session.connect(crafterConfig)
-                        // Wait for MCP server to start
-                        delay(500)
-                        _mcpServerUrl.value = session.mcpServerUrl
-                        if (session.mcpServerUrl != null) {
-                            log.info("MCP server started at: ${session.mcpServerUrl}")
-                        } else {
-                            log.info("Session connected, but no MCP server (only Claude Code starts MCP server)")
-                        }
+                        log.info("Crafter session connected for '$crafterAgent'")
                     }
                 }
             } catch (e: Exception) {
@@ -382,6 +435,7 @@ class IdeaRoutaService(private val project: Project) : Disposable {
 
     override fun dispose() {
         reset()
+        stopMcpServer()
         viewModel.dispose()
         scope.cancel()
     }

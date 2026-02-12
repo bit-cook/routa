@@ -123,6 +123,7 @@ class WorkspaceAgentProvider(
             |2. **NEVER use checkboxes for tasks** — No `- [ ]` lists. Use `@@@task` blocks ONLY (see syntax below).
             |3. **Spec first, always** — Create/update the spec BEFORE any delegation.
             |4. **Wait for approval** — Present the plan and STOP. Wait for user approval before delegating.
+            |5. **INVEST Principle** — Make sure task Independent, Small, Valuable, Testable
             |
             |## Working Directory
             |
@@ -397,7 +398,7 @@ class WorkspaceAgentProvider(
                             // - Clean text → emitted as StreamChunk.Text immediately
                             // - <tool_call> blocks → silently intercepted (not shown as text)
                             filter.feed(frame.text) { cleanText ->
-                                if (cleanText.isNotEmpty()) {
+                                if (cleanText.isNotBlank()) {
                                     onChunk(StreamChunk.Text(cleanText))
                                 }
                             }
@@ -405,7 +406,7 @@ class WorkspaceAgentProvider(
                         is StreamFrame.End -> {
                             // Flush any remaining buffered text (handles partial tags)
                             filter.flush { remaining ->
-                                if (remaining.isNotEmpty()) {
+                                if (remaining.isNotBlank()) {
                                     onChunk(StreamChunk.Text(remaining))
                                 }
                             }
