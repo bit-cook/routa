@@ -31,6 +31,11 @@ mcp-sdk = { module = "io.modelcontextprotocol:kotlin-sdk", version.ref = "mcpKot
 koog-agents = { module = "ai.koog:koog-agents", version.ref = "koog" }
 koog-agents-mcp = { module = "ai.koog:agents-mcp", version.ref = "koog" }
 koog-prompt-executor = { module = "ai.koog:prompt-executor-llms-all", version.ref = "koog" }
+koog-a2a-server = { module = "ai.koog:agents-features-a2a-server", version.ref = "koog" }
+koog-a2a-client = { module = "ai.koog:agents-features-a2a-client", version.ref = "koog" }
+koog-a2a-core = { module = "ai.koog:agents-features-a2a-core", version.ref = "koog" }
+koog-a2a-transport-server-http = { module = "ai.koog:a2a-transport-server-jsonrpc-http", version.ref = "koog" }
+koog-a2a-transport-client-http = { module = "ai.koog:a2a-transport-client-jsonrpc-http", version.ref = "koog" }
 kaml = { module = "com.charleskorn.kaml:kaml", version.ref = "kaml" }
 slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }

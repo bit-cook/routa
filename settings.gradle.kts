@@ -7,3 +7,4 @@ rootProject.name = "agent-dispatcher"
 include("routa-core")
 include("routa-agent-hub")
 include("routa-gui")
+include("examples:agent-hub-a2a-example")
