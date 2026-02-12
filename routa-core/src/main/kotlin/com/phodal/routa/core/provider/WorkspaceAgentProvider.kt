@@ -1,5 +1,6 @@
 package com.phodal.routa.core.provider
 
+import ai.koog.agents.core.tools.SimpleTool
 import ai.koog.prompt.dsl.prompt
 import ai.koog.prompt.streaming.StreamFrame
 import com.phodal.routa.core.config.NamedModelConfig
@@ -12,6 +13,7 @@ import ai.koog.prompt.message.Message
 import com.phodal.routa.core.koog.ListFilesTool
 import com.phodal.routa.core.koog.ReadFileTool
 import com.phodal.routa.core.koog.RoutaAgentFactory
+import com.phodal.routa.core.koog.RoutaToolRegistry
 import com.phodal.routa.core.koog.TextBasedToolExecutor
 import com.phodal.routa.core.koog.ToolCallExtractor
 import com.phodal.routa.core.koog.ToolCallStreamFilter
@@ -84,34 +86,58 @@ class WorkspaceAgentProvider(
         @Volatile var cancelled: Boolean = false,
     )
 
+    // ── Tool Instances ───────────────────────────────────────────────────
+
+    /**
+     * All tools available to this workspace agent.
+     *
+     * Includes:
+     * - File tools: `read_file`, `list_files` (for exploring the codebase)
+     * - Agent coordination tools: all 12 Routa tools (list_agents, create_agent, delegate, etc.)
+     *
+     * These instances are used for:
+     * 1. Schema generation in the system prompt (via [ToolSchemaGenerator])
+     * 2. Dynamic execution in [TextBasedToolExecutor]
+     */
+    private val allTools: List<SimpleTool<*>> by lazy {
+        buildList {
+            // File tools
+            add(ReadFileTool(cwd))
+            add(ListFilesTool(cwd))
+            // Agent coordination tools (all 12)
+            addAll(RoutaToolRegistry.createToolsList(agentTools, workspaceId))
+        }
+    }
+
+    /** Agent coordination tool instances only (for the executor). */
+    private val coordinationTools: List<SimpleTool<*>> by lazy {
+        RoutaToolRegistry.createToolsList(agentTools, workspaceId)
+    }
+
     // ── System Prompt ────────────────────────────────────────────────────
 
-    companion object {
-        /**
-         * Build the workspace agent system prompt with tool descriptions embedded.
-         *
-         * This prompt teaches the LLM to use `<tool_call>` XML format for invoking
-         * tools, instead of relying on native function-calling parameters.
-         *
-         * Design: Workspace Agent is a **Coordinator** role (inspired by Intent).
-         * - It plans, delegates, and verifies
-         * - It does NOT implement code directly
-         * - It has read-only file access for understanding the codebase
-         * - Implementation is delegated to Implementor agents via @@@task blocks
-         *
-         * Tool schemas are auto-generated from [ReadFileTool] and [ListFilesTool]
-         * using [ToolSchemaGenerator], ensuring the prompt stays in sync with
-         * the actual tool implementations.
-         */
-        fun buildSystemPrompt(cwd: String): String {
-            // Auto-generate tool schema from Koog tool definitions
-            val tools = listOf(
-                ReadFileTool(cwd),
-                ListFilesTool(cwd),
-            )
-            val toolsSchema = ToolSchemaGenerator.generateToolsSchema(tools)
+    /**
+     * Build the workspace agent system prompt with tool descriptions embedded.
+     *
+     * This prompt teaches the LLM to use `<tool_call>` XML format for invoking
+     * tools, instead of relying on native function-calling parameters.
+     *
+     * Design: Workspace Agent is a **Coordinator + Orchestrator** role.
+     * - It plans, delegates, and verifies
+     * - It does NOT implement code directly
+     * - It has read-only file access for understanding the codebase
+     * - It has agent coordination tools for managing the multi-agent workflow
+     * - Implementation is delegated to Implementor agents via @@@task blocks
+     *   or via agent coordination tools (create_agent, delegate_task, etc.)
+     *
+     * Tool schemas are auto-generated from Koog [SimpleTool] instances
+     * using [ToolSchemaGenerator], ensuring the prompt stays in sync with
+     * the actual tool implementations.
+     */
+    private fun buildSystemPrompt(): String {
+        val toolsSchema = ToolSchemaGenerator.generateToolsSchema(allTools)
 
-            return """
+        return """
             |## Workspace Coordinator
             |
             |You plan, delegate, and verify. You do NOT implement code yourself. You NEVER edit files directly.
@@ -134,10 +160,12 @@ class WorkspaceAgentProvider(
             |
             |1. **Understand**: Ask 1-4 clarifying questions if requirements are unclear
             |2. **Explore**: Use `list_files` and `read_file` to understand the codebase
-            |3. **Spec**: Write the spec with tasks at the TOP using `@@@task` blocks
-            |4. **STOP**: Present the plan to the user. Say "Please review and approve the plan above."
-            |5. **Wait**: Do NOT proceed until the user approves
-            |6. **Delegate**: After approval, tasks will be delegated to implementor agents
+            |3. **Coordinate**: Use `list_agents`, `get_agent_status`, `get_agent_summary` to check agent states
+            |4. **Spec**: Write the spec with tasks at the TOP using `@@@task` blocks
+            |5. **STOP**: Present the plan to the user. Say "Please review and approve the plan above."
+            |6. **Wait**: Do NOT proceed until the user approves
+            |7. **Delegate**: After approval, use `create_agent` + `delegate_task` or `wake_or_create_task_agent`
+            |   to assign tasks to implementor agents
             |
             |## Spec Format
             |
@@ -183,6 +211,24 @@ class WorkspaceAgentProvider(
             |
             |$toolsSchema
             |
+            |## Tool Categories
+            |
+            |### File Tools (Read-Only)
+            |Use `read_file` and `list_files` to explore and understand the codebase.
+            |You CANNOT write files — delegate implementation to agents.
+            |
+            |### Agent Coordination Tools
+            |Use these to manage the multi-agent workflow:
+            |- `list_agents` — discover agents and their states
+            |- `create_agent` — spin up a new Crafter or Gate agent
+            |- `delegate_task` — assign a task to an agent
+            |- `wake_or_create_task_agent` — wake an existing agent or create a new one for a task
+            |- `send_message_to_agent` / `send_message_to_task_agent` — inter-agent communication
+            |- `report_to_parent` — report completion to the parent agent
+            |- `get_agent_status` / `get_agent_summary` — check agent progress
+            |- `read_agent_conversation` — review what a delegated agent did
+            |- `subscribe_to_events` / `unsubscribe_from_events` — monitor workspace events
+            |
             |## Tool Call Format
             |
             |To use a tool, emit a `<tool_call>` block with a JSON object containing `name` and `arguments`:
@@ -209,18 +255,17 @@ class WorkspaceAgentProvider(
             |## Important Reminders
             |
             |- You NEVER edit files directly. You have no file editing tools.
-            |- Delegate ALL implementation to Implementor agents via `@@@task` blocks.
+            |- Delegate ALL implementation to Implementor agents via `@@@task` blocks or agent coordination tools.
             |- Keep the Spec up to date — update it when plans change or decisions are made.
             |- When you're done planning, present the spec and STOP. Wait for user approval.
         """.trimMargin()
-        }
     }
 
     // ── AgentProvider: Run (with tool call loop) ────────────────────────
 
     override suspend fun run(role: AgentRole, agentId: String, prompt: String): String {
         val components = createLLMComponents()
-        val toolExecutor = TextBasedToolExecutor(cwd)
+        val toolExecutor = TextBasedToolExecutor(cwd, additionalTools = coordinationTools)
 
         activeAgents[agentId] = RunningAgent(role)
 
@@ -318,7 +363,7 @@ class WorkspaceAgentProvider(
         onChunk: (StreamChunk) -> Unit,
     ): String {
         val components = createLLMComponents()
-        val toolExecutor = TextBasedToolExecutor(cwd)
+        val toolExecutor = TextBasedToolExecutor(cwd, additionalTools = coordinationTools)
 
         activeAgents[agentId] = RunningAgent(role)
         onChunk(StreamChunk.Heartbeat())
@@ -526,7 +571,7 @@ class WorkspaceAgentProvider(
         return LLMComponents(
             executor = RoutaAgentFactory.createExecutor(config),
             model = RoutaAgentFactory.createModel(config),
-            systemPrompt = buildSystemPrompt(cwd),
+            systemPrompt = buildSystemPrompt(),
         )
     }
 }

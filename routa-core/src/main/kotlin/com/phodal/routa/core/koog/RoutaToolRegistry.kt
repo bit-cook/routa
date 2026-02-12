@@ -1,5 +1,6 @@
 package com.phodal.routa.core.koog
 
+import ai.koog.agents.core.tools.SimpleTool
 import ai.koog.agents.core.tools.ToolRegistry
 import com.phodal.routa.core.tool.AgentTools
 
@@ -28,21 +29,39 @@ object RoutaToolRegistry {
      */
     fun create(agentTools: AgentTools, workspaceId: String): ToolRegistry {
         return ToolRegistry {
-            // Core coordination tools
-            tool(ListAgentsTool(agentTools, workspaceId))
-            tool(ReadAgentConversationTool(agentTools))
-            tool(CreateAgentTool(agentTools, workspaceId))
-            tool(DelegateTaskTool(agentTools))
-            tool(MessageAgentTool(agentTools))
-            tool(ReportToParentTool(agentTools))
-            // Task-agent lifecycle tools
-            tool(WakeOrCreateTaskAgentTool(agentTools, workspaceId))
-            tool(SendMessageToTaskAgentTool(agentTools))
-            tool(GetAgentStatusTool(agentTools))
-            tool(GetAgentSummaryTool(agentTools))
-            // Event subscription tools
-            tool(SubscribeToEventsTool(agentTools))
-            tool(UnsubscribeFromEventsTool(agentTools))
+            for (tool in createToolsList(agentTools, workspaceId)) {
+                tool(tool)
+            }
         }
+    }
+
+    /**
+     * Create a list of all 12 Routa coordination tools as [SimpleTool] instances.
+     *
+     * Unlike [create], this returns raw tool instances that can be used
+     * outside a [ToolRegistry], e.g., for schema generation or text-based execution
+     * via [TextBasedToolExecutor].
+     *
+     * @param agentTools The underlying AgentTools implementation.
+     * @param workspaceId Default workspace ID for tools that need it.
+     */
+    fun createToolsList(agentTools: AgentTools, workspaceId: String): List<SimpleTool<*>> {
+        return listOf(
+            // Core coordination tools
+            ListAgentsTool(agentTools, workspaceId),
+            ReadAgentConversationTool(agentTools),
+            CreateAgentTool(agentTools, workspaceId),
+            DelegateTaskTool(agentTools),
+            MessageAgentTool(agentTools),
+            ReportToParentTool(agentTools),
+            // Task-agent lifecycle tools
+            WakeOrCreateTaskAgentTool(agentTools, workspaceId),
+            SendMessageToTaskAgentTool(agentTools),
+            GetAgentStatusTool(agentTools),
+            GetAgentSummaryTool(agentTools),
+            // Event subscription tools
+            SubscribeToEventsTool(agentTools),
+            UnsubscribeFromEventsTool(agentTools),
+        )
     }
 }
