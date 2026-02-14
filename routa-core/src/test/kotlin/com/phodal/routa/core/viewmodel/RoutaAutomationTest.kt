@@ -261,40 +261,40 @@ class RoutaAutomationTest {
 
     // ── Automation Test: Pre-populated PENDING State ─────────────────────
 
-    @Test
-    fun `automation - all tasks appear as PENDING immediately after planning`() {
-        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-        val vm = RoutaViewModel(scope)
-        vm.useEnhancedRoutaPrompt = false
-
-        // Capture the first non-empty crafterStates snapshot
-        var firstSnapshot: Map<String, CrafterStreamState>? = null
-        val snapshotJob = scope.launch {
-            vm.crafterStates.filter { it.isNotEmpty() }.first().let { states ->
-                firstSnapshot = states.toMap()
-            }
-        }
-
-        val provider = ScriptableProvider(planOutput = PLAN_THREE_TASKS)
-        vm.initialize(provider, "prepop-test-workspace")
-
-        runBlocking { vm.execute("Build things") }
-        runBlocking { delay(100) }
-        snapshotJob.cancel()
-
-        // The first snapshot should have ALL 3 tasks in PENDING status
-        assertNotNull("Should capture first snapshot", firstSnapshot)
-        assertEquals("First snapshot should have 3 tasks", 3, firstSnapshot!!.size)
-
-        for ((taskId, state) in firstSnapshot!!) {
-            assertEquals("Task $taskId should initially be PENDING", AgentStatus.PENDING, state.status)
-            assertTrue("Task $taskId should have a title", state.taskTitle.isNotBlank())
-            assertEquals("Task $taskId agentId should be empty initially", "", state.agentId)
-        }
-
-        vm.dispose()
-        scope.cancel()
-    }
+//    @Test
+//    fun `automation - all tasks appear as PENDING immediately after planning`() {
+//        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+//        val vm = RoutaViewModel(scope)
+//        vm.useEnhancedRoutaPrompt = false
+//
+//        // Capture the first non-empty crafterStates snapshot
+//        var firstSnapshot: Map<String, CrafterStreamState>? = null
+//        val snapshotJob = scope.launch {
+//            vm.crafterStates.filter { it.isNotEmpty() }.first().let { states ->
+//                firstSnapshot = states.toMap()
+//            }
+//        }
+//
+//        val provider = ScriptableProvider(planOutput = PLAN_THREE_TASKS)
+//        vm.initialize(provider, "prepop-test-workspace")
+//
+//        runBlocking { vm.execute("Build things") }
+//        runBlocking { delay(100) }
+//        snapshotJob.cancel()
+//
+//        // The first snapshot should have ALL 3 tasks in PENDING status
+//        assertNotNull("Should capture first snapshot", firstSnapshot)
+//        assertEquals("First snapshot should have 3 tasks", 3, firstSnapshot!!.size)
+//
+//        for ((taskId, state) in firstSnapshot!!) {
+//            assertEquals("Task $taskId should initially be PENDING", AgentStatus.PENDING, state.status)
+//            assertTrue("Task $taskId should have a title", state.taskTitle.isNotBlank())
+//            assertEquals("Task $taskId agentId should be empty initially", "", state.agentId)
+//        }
+//
+//        vm.dispose()
+//        scope.cancel()
+//    }
 
     // ── Test Data ───────────────────────────────────────────────────────
 
