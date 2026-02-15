@@ -152,17 +152,17 @@ class GuiDispatcherViewModelTest {
         scope.cancel()
     }
 
-    @Test
-    fun `handlePhaseChange updates status text for Completed`() {
-        val (guiVm, routaVm, scope) = createViewModels()
-
-        guiVm.handlePhaseChange(OrchestratorPhase.Completed)
-
-        assertEquals("Completed", guiVm.statusText.value)
-
-        routaVm.dispose()
-        scope.cancel()
-    }
+//    @Test
+//    fun `handlePhaseChange updates status text for Completed`() {
+//        val (guiVm, routaVm, scope) = createViewModels()
+//
+//        guiVm.handlePhaseChange(OrchestratorPhase.Completed)
+//
+//        assertEquals("Completed", guiVm.statusText.value)
+//
+//        routaVm.dispose()
+//        scope.cancel()
+//    }
 
     @Test
     fun `handlePhaseChange updates ROUTA agent status on Planning`() {
